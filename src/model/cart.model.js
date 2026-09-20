@@ -1,0 +1,45 @@
+const mongoose = require("mongoose");
+
+const cartItemSchema = new mongoose.Schema(
+  {
+    productId: { type: mongoose.Schema.Types.ObjectId, ref: "Product", required: true },
+    storeId: { type: mongoose.Schema.Types.ObjectId, ref: "Store", required: true },
+    storeName: { type: String, default: null },
+    quantity: {
+      type: Number,
+      required: true,
+      min: [1, "Quantity must be at least 1"],
+      validate: { validator: Number.isInteger, message: "Quantity must be a whole number" },
+    },
+
+    // user er selection
+    size: { type: String, default: null, trim: true },
+    weight: { type: String, default: null, trim: true },
+
+    // product snapshot
+    name: { type: String, required: true },
+    productCode: { type: String },
+    image: { type: String, default: null },
+    unit: { type: String },
+    mrp: { type: Number, required: true, min: 0 },
+    offerPrice: { type: Number, required: true, min: 0 },
+  },
+  { timestamps: true },
+);
+
+const cartSchema = new mongoose.Schema(
+  {
+    userId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+      required: true,
+      unique: true, // ek user er ekta cart
+    },
+    items: [cartItemSchema],
+  },
+  { timestamps: true },
+);
+
+const CartModel = mongoose.model("Cart", cartSchema);
+
+module.exports = CartModel;
