@@ -17,6 +17,19 @@ const { sendPasswordSMS } = require("../helper/sendPasswordSMS.js");
 const sendEmailVerificationOTP = require("../helper/sendEmailVerificationOTP.js");
 const EmailVerifyModel = require("../model/otpverify.js");
 const RecentSearchModel = require("../model/recentSearch.model");
+const sendStoreCredentialsEmail = require("../helper/sendStoreCredentialsEmail.js");
+
+const toNumberOrUndefined = (value) => {
+  if (value === undefined || value === null || value === "") return undefined;
+  const num = Number(value);
+  return Number.isFinite(num) ? num : undefined;
+};
+
+// trim kore, empty string hole undefined return kore
+const clean = (value) => {
+  const trimmed = typeof value === "string" ? value.trim() : value;
+  return trimmed === "" ? undefined : trimmed;
+};
 
 const registerAdmin = async (req, res) => {
   try {
@@ -334,6 +347,7 @@ const registerStoreOwner = async (req, res) => {
 };
 
 const createUser = async (req, res) => {
+  let user;
   try {
     const {
       name,
@@ -362,46 +376,42 @@ const createUser = async (req, res) => {
     const salt = await bcrypt.genSalt(10);
     const hashedPassword = await bcrypt.hash(password.trim(), salt);
 
-    const user = await UserModel.create({
+    user = await UserModel.create({
       name: name?.trim(),
       email: email?.trim(),
       phone: phone?.trim(),
       password: hashedPassword,
       role: "STORE",
-      isVerified:true
+      isVerified: true,
     });
 
     /* IMAGE UPLOAD */
-
     let images = [];
 
     if (req.files?.length) {
       for (const file of req.files) {
         if (file.fieldname.startsWith("image")) {
           const fileName = `amp-store/${Date.now()}-${file.originalname}`;
-
           const url = await uploadToR2(file.buffer, fileName, file.mimetype);
-
           images.push(url);
         }
       }
     }
 
     const store = await StoreModel.create({
-      storeName: storeName?.trim(),
-      storeType: storeType?.trim(),
-      description: description?.trim(),
+      storeName: clean(storeName),
+      storeType: clean(storeType),
+      description: clean(description),
 
-      contactNo: contactNo?.trim(),
-      whatsappNo: whatsappNo?.trim(),
-      supportNo: supportNo?.trim(),
+      contactNo: clean(contactNo),
+      whatsappNo: clean(whatsappNo),
+      supportNo: clean(supportNo),
 
-      email: email?.trim(),
+      email: clean(email),
+      gstin: clean(gstin),
 
-      gstin: gstin?.trim(),
-
-      lat: Number(lat),
-      long: Number(long),
+      lat: toNumberOrUndefined(lat),
+      long: toNumberOrUndefined(long),
 
       images,
 
@@ -410,7 +420,6 @@ const createUser = async (req, res) => {
         state: req.body?.address?.state,
         country: req.body?.address?.country,
       },
-
       timingByDay: {
         sunday: req.body?.timingByDay?.sunday,
         monday: req.body?.timingByDay?.monday,
@@ -424,7 +433,13 @@ const createUser = async (req, res) => {
       userId: user._id,
       isVerify: true,
     });
-
+    await sendStoreCredentialsEmail({
+      toEmail: user.email,
+      ownerName: user.name,
+      storeName: store.storeName,
+      storeUniqueId: store.storeUniqueId,
+      password: password.trim(),
+    });
     return res.status(201).json({
       message: "User and store created successfully",
       user: {
@@ -434,6 +449,11 @@ const createUser = async (req, res) => {
       store,
     });
   } catch (error) {
+    // store create fail hole orphan user delete kore dao
+    if (user?._id) {
+      await UserModel.findByIdAndDelete(user._id).catch(() => {});
+    }
+
     console.log("User creation error:", error);
 
     return res.status(500).json({
@@ -441,7 +461,6 @@ const createUser = async (req, res) => {
     });
   }
 };
-
 
 const createStore = async (req, res) => {
   try {
@@ -528,6 +547,15 @@ const createStore = async (req, res) => {
       userId: userId,
 
       isVerify: false,
+    });
+
+    return res.status(201).json({
+      message: "User and store created successfully",
+      user: {
+        ...user.toObject(),
+        password: undefined,
+      },
+      store,
     });
 
     return res.status(201).json({
@@ -1442,5 +1470,5 @@ module.exports = {
   clearRecentSearches,
   relatedStores,
   nearbyStores,
-  registerUser
+  registerUser,
 };
