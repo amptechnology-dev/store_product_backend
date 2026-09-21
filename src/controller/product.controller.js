@@ -666,7 +666,16 @@ const getStoreCategories = async (req, res) => {
           },
         },
       },
-      { $project: { name: 1, description: 1, productCount: 1, createdAt: 1 } },
+      {
+        $project: {
+          name: 1,
+          description: 1,
+          image: 1,
+          icon: 1,
+          productCount: 1,
+          createdAt: 1,
+        },
+      },
     ];
 
     // default e empty category hide kora hoy

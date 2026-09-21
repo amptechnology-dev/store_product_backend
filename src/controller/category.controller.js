@@ -1,4 +1,18 @@
 const CategoryModel = require("../model/category.model.js");
+const { uploadToR2 } = require("../helper/upload.js");
+
+const uploadCategoryImage = async (files = []) => {
+  const file = files.find((f) => f.fieldname.startsWith("image"));
+  if (!file) return null;
+
+  const fileName = `amp-store/categories/${Date.now()}-${file.originalname}`;
+  return uploadToR2(file.buffer, fileName, file.mimetype);
+};
+
+const parseBoolean = (value) => {
+  if (value === undefined) return undefined;
+  return value === true || value === "true";
+};
 
 const createCategory = async (req, res) => {
   try {
@@ -7,45 +21,35 @@ const createCategory = async (req, res) => {
         message: "Only store users can add a category",
       });
     }
-
-    const { name, description, storeId } = req.body;
-
+    const { name, description, storeId, icon } = req.body;
     if (!name?.trim() || !storeId) {
-      return res.status(400).json({
-        message: "Name and storeId are required",
-      });
+      return res.status(400).json({ message: "Name and storeId are required" });
     }
-
-    const exists = await CategoryModel.findOne({
-      name: name.trim(),
-      storeId,
-    });
-
+    const exists = await CategoryModel.findOne({ name: name.trim(), storeId });
     if (exists) {
-      return res.status(400).json({
-        message: "Category already exists for this store",
-      });
+      return res
+        .status(400)
+        .json({ message: "Category already exists for this store" });
     }
-
+    const image = (await uploadCategoryImage(req.files)) || "";
     const category = await CategoryModel.create({
       name: name.trim(),
       description: description?.trim() || "",
+      icon: icon?.trim() || "",
+      image,
       storeId,
     });
-
     return res.status(201).json({
       message: "Category created successfully",
       category,
     });
   } catch (error) {
     console.error(error);
-
     if (error.code === 11000) {
       return res.status(400).json({
         message: "Category already exists for this store",
       });
     }
-
     return res.status(500).json({
       message: "Internal server error",
     });
@@ -123,7 +127,7 @@ const updateCategory = async (req, res) => {
       });
     }
 
-    const { name, description, isActive } = req.body;
+    const { name, description, icon, isActive, removeImage } = req.body;
 
     if (name?.trim()) {
       const exists = await CategoryModel.findOne({
@@ -140,9 +144,15 @@ const updateCategory = async (req, res) => {
 
       category.name = name.trim();
     }
-
     category.description = description?.trim() ?? category.description;
-    category.isActive = isActive ?? category.isActive;
+    category.icon = icon !== undefined ? icon.trim() : category.icon;
+    category.isActive = parseBoolean(isActive) ?? category.isActive;
+    const newImage = await uploadCategoryImage(req.files);
+    if (newImage) {
+      category.image = newImage;
+    } else if (removeImage === "true" || removeImage === true) {
+      category.image = "";
+    }
 
     await category.save();
 

@@ -3,29 +3,21 @@ const { model } = mongoose;
 
 const categorySchema = new mongoose.Schema(
   {
-    name: {
-      type: String,
-      required: true,
-      trim: true,
-    },
-
+    name: { type: String, required: true, trim: true },
     storeId: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "Store",
       required: true,
     },
+    description: { type: String, default: "" },
 
-    description: {
-      type: String,
-      default: "",
-    },
+    image: { type: String, default: "" },
 
-    isActive: {
-      type: Boolean,
-      default: true,
-    },
+    icon: { type: String, trim: true, default: "" },
+
+    isActive: { type: Boolean, default: true },
   },
-  { timestamps: true }
+  { timestamps: true },
 );
 
 categorySchema.index({ storeId: 1, name: 1 }, { unique: true });
