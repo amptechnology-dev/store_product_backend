@@ -1,10 +1,21 @@
 const mongoose = require("mongoose");
 const { getNextSequence } = require("../helper/counter.js");
 
-const ORDER_STATUSES = ["PENDING", "CONFIRMED", "SHIPPED", "DELIVERED", "CANCELLED"];
+const ORDER_STATUSES = [
+  "PENDING",
+  "CONFIRMED",
+  "SHIPPED",
+  "DELIVERED",
+  "CANCELLED",
+];
 
 const orderItemSchema = new mongoose.Schema({
-  productId: { type: mongoose.Schema.Types.ObjectId, ref: "Product", required: true },
+  productId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: "Product",
+    required: true,
+  },
+  variantId: { type: mongoose.Schema.Types.ObjectId, required: true },
   name: { type: String, required: true },
   productCode: { type: String },
   image: { type: String, default: null },
@@ -46,12 +57,24 @@ const orderSchema = new mongoose.Schema(
     orderNumber: { type: String, unique: true },
 
     // je cart theke order holo
-    cartId: { type: mongoose.Schema.Types.ObjectId, ref: "Cart", default: null },
+    cartId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Cart",
+      default: null,
+    },
     // ek checkout e toiri hoya shob order (store wise) er common id
     checkoutId: { type: mongoose.Schema.Types.ObjectId, default: null },
 
-    userId: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true },
-    storeId: { type: mongoose.Schema.Types.ObjectId, ref: "Store", required: true },
+    userId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+      required: true,
+    },
+    storeId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Store",
+      required: true,
+    },
 
     // store snapshot (store delete hole o order history thakbe)
     storeName: { type: String },
@@ -71,7 +94,11 @@ const orderSchema = new mongoose.Schema(
     note: { type: String, default: null },
 
     paymentMethod: { type: String, enum: ["COD"], default: "COD" },
-    paymentStatus: { type: String, enum: ["PENDING", "PAID"], default: "PENDING" },
+    paymentStatus: {
+      type: String,
+      enum: ["PENDING", "PAID"],
+      default: "PENDING",
+    },
 
     status: { type: String, enum: ORDER_STATUSES, default: "PENDING" },
     statusHistory: [statusHistorySchema],

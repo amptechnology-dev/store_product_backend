@@ -12,7 +12,19 @@ const sendProductVerifyEmail = require("../helper/sendProductVerifyEmail.js");
 
 const createProduct = async (req, res) => {
   try {
-    const parsedData = createProductSchema.parse(req.body);
+    const body = { ...req.body };
+    // multipart/form-data দিয়ে আসলে variants একটা JSON string হয়ে আসবে
+    if (typeof body.variants === "string") {
+      try {
+        body.variants = JSON.parse(body.variants);
+      } catch {
+        return res
+          .status(400)
+          .json({ success: false, message: "Invalid variants format" });
+      }
+    }
+
+    const parsedData = createProductSchema.parse(body);
     const userId = req.user?._id || req.user?.id;
     if (!userId) {
       return res.status(401).json({ success: false, message: "Unauthorized" });
@@ -63,7 +75,7 @@ const createProduct = async (req, res) => {
     }
 
     const product = await ProductModel.create({
-      ...parsedData,
+      ...parsedData, // variants array shoho
       images,
       userId,
       isVerified: true,
@@ -85,6 +97,18 @@ const createProduct = async (req, res) => {
           field: err.path.join("."),
           message: err.message,
         })),
+      });
+    }
+
+    if (error.name === "ValidationError") {
+      const errors = Object.values(error.errors).map((e) => ({
+        field: e.path,
+        message: e.message,
+      }));
+      return res.status(400).json({
+        success: false,
+        message: "Validation failed",
+        errors,
       });
     }
 
@@ -150,10 +174,9 @@ const getAllProducts = async (req, res) => {
           images: 1,
           description: 1,
           unit: 1,
-          size: 1,
-          weight: 1,
-          mrp: 1,
-          offerPrice: 1,
+          variants: 1,
+          minOfferPrice: { $min: "$variants.offerPrice" },
+          maxOfferPrice: { $max: "$variants.offerPrice" },
           deliveryTime: 1,
 
           isActive: 1,
@@ -243,7 +266,18 @@ const updateProduct = async (req, res) => {
         .json({ success: false, message: "Product not found" });
     }
 
-    const parsedData = updateProductSchema.parse(req.body);
+    const body = { ...req.body };
+    if (typeof body.variants === "string") {
+      try {
+        body.variants = JSON.parse(body.variants);
+      } catch {
+        return res
+          .status(400)
+          .json({ success: false, message: "Invalid variants format" });
+      }
+    }
+
+    const parsedData = updateProductSchema.parse(body);
 
     // name duplicate check
     if (parsedData.name) {
@@ -275,22 +309,6 @@ const updateProduct = async (req, res) => {
       }
     }
 
-    // mrp / offerPrice cross validation (partial update হলেও)
-    const finalMrp = parsedData.mrp ?? existingProduct.mrp;
-    const finalOfferPrice = parsedData.offerPrice ?? existingProduct.offerPrice;
-    if (finalOfferPrice > finalMrp) {
-      return res.status(400).json({
-        success: false,
-        message: "Validation failed",
-        errors: [
-          {
-            field: "offerPrice",
-            message: "Offer price cannot be greater than MRP",
-          },
-        ],
-      });
-    }
-
     // image handling
     let images = [];
     if (req.body.images) {
@@ -311,13 +329,9 @@ const updateProduct = async (req, res) => {
       images = existingProduct.images;
     }
 
-    // ✅ FIX: mrp আর offerPrice দুটোই সবসময় final resolved value দিয়ে পাঠানো হচ্ছে,
-    // যাতে Mongoose এর schema validator এর "this.mrp" undefined না হয়ে যায়
-    // (findByIdAndUpdate এ "this" query context হয়, document না)
+    // note: variants pathale purota replace hobe (partial-merge kora hoyni)
     const updateData = {
       ...parsedData,
-      mrp: finalMrp,
-      offerPrice: finalOfferPrice,
       images,
     };
 
@@ -473,10 +487,9 @@ const allProductWithStore = async (req, res) => {
           images: 1,
           description: 1,
           unit: 1,
-          size: 1,
-          weight: 1,
-          mrp: 1,
-          offerPrice: 1,
+          variants: 1,
+          minOfferPrice: { $min: "$variants.offerPrice" },
+          maxOfferPrice: { $max: "$variants.offerPrice" },
           deliveryTime: 1,
 
           isActive: 1,
@@ -529,15 +542,14 @@ const PUBLIC_STORE_FIELDS =
   "storeName storeType storeUniqueId images address lat long contactNo whatsappNo supportNo email description timingByDay isFeatured";
 
 const PRODUCT_LIST_FIELDS =
-  "name productCode images description unit size weight mrp offerPrice deliveryTime storeId categoryId createdAt";
+  "name productCode images description unit variants deliveryTime storeId categoryId createdAt";
 
 const SORT_MAP = {
   newest: { createdAt: -1 },
   oldest: { createdAt: 1 },
-  price_asc: { offerPrice: 1 },
-  price_desc: { offerPrice: -1 },
   name_asc: { name: 1 },
   name_desc: { name: -1 },
+  // price_asc / price_desc ekhon fetchStoreProducts-e alada kore handle hocche
 };
 
 const getPagination = (query) => {
@@ -553,7 +565,6 @@ const toPositiveNumber = (value) => {
 };
 
 // storeUniqueId diye active store ber kora
-// Only verified store dekhate chaile: { storeUniqueId, isActive: true, isVerify: true }
 const getPublicStore = (storeUniqueId) =>
   StoreModel.findOne({ storeUniqueId, isActive: true })
     .select(PUBLIC_STORE_FIELDS)
@@ -563,50 +574,100 @@ const getPublicStore = (storeUniqueId) =>
 const formatProduct = ({ categoryId, ...product }) => ({
   ...product,
   categoryId: categoryId?._id ?? null,
-  category: categoryId ? { _id: categoryId._id, name: categoryId.name } : null,
+  category: categoryId?._id
+    ? { _id: categoryId._id, name: categoryId.name }
+    : null,
 });
 
 // list + search + category + price filter + sort + pagination (shared logic)
+// variants array-er kaarone ekhon aggregation diye kora hocche
 const fetchStoreProducts = async (store, query, categoryId) => {
   const { page, limit, skip } = getPagination(query);
 
-  const filter = {
+  const match = {
     storeId: store._id,
     isActive: true,
     isVerified: true,
   };
 
-  if (categoryId) filter.categoryId = categoryId;
+  if (categoryId) {
+    match.categoryId = new mongoose.Types.ObjectId(categoryId);
+  }
 
   const search = (query.search || "").trim();
   if (search) {
     const regex = new RegExp(escapeRegex(search), "i");
-    // description e o search chaile { description: regex } add koro
-    filter.$or = [{ name: regex }, { productCode: regex }];
+    match.$or = [{ name: regex }, { productCode: regex }];
   }
 
   const minPrice = toPositiveNumber(query.minPrice);
   const maxPrice = toPositiveNumber(query.maxPrice);
+
+  const pipeline = [{ $match: match }];
+
   if (minPrice !== null || maxPrice !== null) {
-    filter.offerPrice = {};
-    if (minPrice !== null) filter.offerPrice.$gte = minPrice;
-    if (maxPrice !== null) filter.offerPrice.$lte = maxPrice;
+    const priceRange = {};
+    if (minPrice !== null) priceRange.$gte = minPrice;
+    if (maxPrice !== null) priceRange.$lte = maxPrice;
+    // at least one active variant er offerPrice range-er moddhe thakte hobe
+    pipeline.push({
+      $match: {
+        variants: { $elemMatch: { offerPrice: priceRange, isActive: true } },
+      },
+    });
   }
 
-  // _id tie-breaker: pagination e duplicate/missing item ashbe na
-  const sort = { ...(SORT_MAP[query.sortBy] || SORT_MAP.newest), _id: -1 };
+  pipeline.push({
+    $addFields: { minOfferPrice: { $min: "$variants.offerPrice" } },
+  });
 
-  const [products, totalProducts] = await Promise.all([
-    ProductModel.find(filter)
-      .select(PRODUCT_LIST_FIELDS)
-      .populate("categoryId", "name")
-      .sort(sort)
-      .skip(skip)
-      .limit(limit)
-      .lean(),
-    ProductModel.countDocuments(filter),
-  ]);
+  let sort;
+  if (query.sortBy === "price_asc") sort = { minOfferPrice: 1, _id: -1 };
+  else if (query.sortBy === "price_desc") sort = { minOfferPrice: -1, _id: -1 };
+  else sort = { ...(SORT_MAP[query.sortBy] || SORT_MAP.newest), _id: -1 };
 
+  pipeline.push(
+    { $sort: sort },
+    {
+      $facet: {
+        data: [
+          { $skip: skip },
+          { $limit: limit },
+          {
+            $lookup: {
+              from: "categories",
+              localField: "categoryId",
+              foreignField: "_id",
+              as: "categoryId",
+            },
+          },
+          {
+            $unwind: { path: "$categoryId", preserveNullAndEmptyArrays: true },
+          },
+          {
+            $project: {
+              name: 1,
+              productCode: 1,
+              images: 1,
+              description: 1,
+              unit: 1,
+              variants: 1,
+              minOfferPrice: 1,
+              deliveryTime: 1,
+              storeId: 1,
+              categoryId: { _id: 1, name: 1 },
+              createdAt: 1,
+            },
+          },
+        ],
+        totalCount: [{ $count: "count" }],
+      },
+    },
+  );
+
+  const [result] = await ProductModel.aggregate(pipeline);
+  const products = result?.data || [];
+  const totalProducts = result?.totalCount?.[0]?.count || 0;
   const totalPages = Math.ceil(totalProducts / limit);
 
   return {

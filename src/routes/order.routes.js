@@ -5,6 +5,7 @@ const authorize = require("../middleware/authorize.js");
 
 const {
   checkout,
+  buyNow,
   getMyOrders,
   getMyOrdersByStore,
   getMyOrderById,
@@ -16,15 +17,35 @@ const {
 
 // ---------- USER ----------
 router.post("/checkout", verifyJwt, authorize("USER"), checkout);
+router.post("/buy-now", verifyJwt, authorize("USER"), buyNow); // ✅ NEW: cart chara direct order
 router.get("/my-orders", verifyJwt, authorize("USER"), getMyOrders);
-// "/by-store" obosshoi "/:orderId" er age, na hole "by-store" ke orderId dhore nibe
-router.get("/my-orders/by-store", verifyJwt, authorize("USER"), getMyOrdersByStore);
+router.get(
+  "/my-orders/by-store",
+  verifyJwt,
+  authorize("USER"),
+  getMyOrdersByStore,
+);
 router.get("/my-orders/:orderId", verifyJwt, authorize("USER"), getMyOrderById);
-router.patch("/my-orders/:orderId/cancel", verifyJwt, authorize("USER"), cancelMyOrder);
+router.patch(
+  "/my-orders/:orderId/cancel",
+  verifyJwt,
+  authorize("USER"),
+  cancelMyOrder,
+);
 
 // ---------- STORE ----------
 router.get("/store-orders", verifyJwt, authorize("STORE"), getStoreOrders);
-router.get("/store-orders/:orderId", verifyJwt, authorize("STORE"), getStoreOrderById);
-router.patch("/store-orders/:orderId/status", verifyJwt, authorize("STORE"), updateOrderStatus);
+router.get(
+  "/store-orders/:orderId",
+  verifyJwt,
+  authorize("STORE"),
+  getStoreOrderById,
+);
+router.patch(
+  "/store-orders/:orderId/status",
+  verifyJwt,
+  authorize("STORE"),
+  updateOrderStatus,
+);
 
 module.exports = router;

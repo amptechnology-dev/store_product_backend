@@ -26,7 +26,6 @@ const handleError = (res, error, label) => {
       })),
     });
   }
-  // duplicate / concurrent request e ekoi cart ek shathe save hole
   if (error.name === "VersionError") {
     return res.status(409).json({
       success: false,
@@ -37,49 +36,21 @@ const handleError = (res, error, label) => {
   return res.status(500).json({ success: false, message: "Internal server error" });
 };
 
-// product.size / product.weight = "S,M,L,XL" ba "2kg,4kg,6kg" (comma separated options)
-const parseOptions = (value) =>
-  value
-    ? String(value)
-        .split(",")
-        .map((s) => s.trim())
-        .filter(Boolean)
-    : [];
+// product-er variants array theke ekta specific active variant khoja
+const findActiveVariant = (product, variantId) =>
+  (product?.variants || []).find(
+    (v) => String(v._id) === String(variantId) && v.isActive !== false,
+  );
 
-const resolveOption = (label, productValue, selected) => {
-  const options = parseOptions(productValue);
-
-  if (options.length === 0) {
-    return selected
-      ? { error: `${label} is not applicable for this product` }
-      : { value: null };
-  }
-
-  if (!selected) {
-    if (options.length === 1) return { value: options[0] }; // ekta option hole auto select
-    return { error: `Please select a ${label}` };
-  }
-
-  const match = options.find((o) => o.toLowerCase() === selected.toLowerCase());
-  if (!match) {
-    return { error: `Invalid ${label}. Available: ${options.join(", ")}` };
-  }
-  return { value: match };
-};
-
-const optionError = (field, message) => ({
-  success: false,
-  message: "Validation failed",
-  errors: [{ field, message }],
-});
-
-const toSnapshot = (product) => ({
+const toSnapshot = (product, variant) => ({
   name: product.name,
   productCode: product.productCode,
   image: product.images?.[0] ?? null,
   unit: product.unit,
-  mrp: product.mrp,
-  offerPrice: product.offerPrice,
+  size: variant.size ?? null,
+  weight: variant.weight ?? null,
+  mrp: variant.mrp,
+  offerPrice: variant.offerPrice,
 });
 
 const newSummary = () => ({
@@ -97,8 +68,7 @@ const finalizeSummary = (s) => {
   return s;
 };
 
-// cart ke store wise group kore live product data shoho response banay
-// (unavailable item hole snapshot dekhay, summary te dhore na)
+// cart ke store wise group kore live product+variant data shoho response banay
 const serializeCart = async (cart) => {
   if (!cart || cart.items.length === 0) {
     return {
@@ -113,7 +83,7 @@ const serializeCart = async (cart) => {
 
   const [products, stores] = await Promise.all([
     ProductModel.find({ _id: { $in: productIds } })
-      .select("name productCode images unit mrp offerPrice isActive isVerified")
+      .select("name productCode images unit variants isActive isVerified")
       .lean(),
     StoreModel.find({ _id: { $in: storeIds } })
       .select("storeName storeUniqueId images isActive")
@@ -145,15 +115,20 @@ const serializeCart = async (cart) => {
     }
     const group = groups.get(storeKey);
 
-    const live = productMap.get(String(item.productId));
-    const isAvailable = Boolean(live?.isActive && live?.isVerified && store?.isActive);
-    const source = isAvailable ? live : item;
-    const lineTotal = round2(source.offerPrice * item.quantity);
+    const liveProduct = productMap.get(String(item.productId));
+    const liveVariant = liveProduct ? findActiveVariant(liveProduct, item.variantId) : null;
+    const isAvailable = Boolean(
+      liveProduct?.isActive && liveProduct?.isVerified && liveVariant && store?.isActive,
+    );
+
+    const mrp = isAvailable ? liveVariant.mrp : item.mrp;
+    const offerPrice = isAvailable ? liveVariant.offerPrice : item.offerPrice;
+    const lineTotal = round2(offerPrice * item.quantity);
 
     for (const s of [group.summary, overall]) {
       if (isAvailable) {
         s.totalItems += item.quantity;
-        s.totalMrp += source.mrp * item.quantity;
+        s.totalMrp += mrp * item.quantity;
         s.totalAmount += lineTotal;
       } else {
         s.hasUnavailableItems = true;
@@ -163,18 +138,20 @@ const serializeCart = async (cart) => {
     group.items.push({
       _id: item._id,
       productId: item.productId,
-      name: source.name,
-      productCode: source.productCode,
-      image: isAvailable ? (live.images?.[0] ?? null) : (item.image ?? null),
-      unit: source.unit,
-      size: item.size,
-      weight: item.weight,
+      variantId: item.variantId,
+      name: isAvailable ? liveProduct.name : item.name,
+      productCode: isAvailable ? liveProduct.productCode : item.productCode,
+      image: isAvailable ? (liveProduct.images?.[0] ?? null) : (item.image ?? null),
+      unit: isAvailable ? liveProduct.unit : item.unit,
+      size: isAvailable ? liveVariant.size : item.size,
+      weight: isAvailable ? liveVariant.weight : item.weight,
       quantity: item.quantity,
-      mrp: source.mrp,
-      offerPrice: source.offerPrice,
+      mrp,
+      offerPrice,
       lineTotal,
       isAvailable,
-      priceChanged: isAvailable && live.offerPrice !== item.offerPrice,
+      priceChanged: isAvailable && liveVariant.offerPrice !== item.offerPrice,
+      stock: isAvailable ? liveVariant.stock : undefined,
     });
   }
 
@@ -192,11 +169,11 @@ const serializeCart = async (cart) => {
 
 // ===================== 1. ADD TO CART =====================
 // POST /cart/add
-// body: { productId, quantity?, size?, weight? }
+// body: { productId, variantId, quantity? }
 const addToCart = async (req, res) => {
   try {
     const userId = getUserId(req);
-    const { productId, quantity, size, weight } = addToCartSchema.parse(req.body);
+    const { productId, variantId, quantity } = addToCartSchema.parse(req.body);
 
     const product = await ProductModel.findOne({
       _id: productId,
@@ -207,6 +184,13 @@ const addToCart = async (req, res) => {
       return res.status(404).json({ success: false, message: "Product not available" });
     }
 
+    const variant = findActiveVariant(product, variantId);
+    if (!variant) {
+      return res
+        .status(404)
+        .json({ success: false, message: "Selected size/weight is not available" });
+    }
+
     const store = await StoreModel.findOne({ _id: product.storeId, isActive: true })
       .select("storeName")
       .lean();
@@ -214,27 +198,18 @@ const addToCart = async (req, res) => {
       return res.status(400).json({ success: false, message: "Store is currently unavailable" });
     }
 
-    const sizeResult = resolveOption("size", product.size, size);
-    if (sizeResult.error) {
-      return res.status(400).json(optionError("size", sizeResult.error));
-    }
-    const weightResult = resolveOption("weight", product.weight, weight);
-    if (weightResult.error) {
-      return res.status(400).json(optionError("weight", weightResult.error));
-    }
-
-    // cart na thakle create (userId unique)
     const cart = await CartModel.findOneAndUpdate(
       { userId },
       { $setOnInsert: { userId } },
       { upsert: true, new: true },
     );
 
+    // ✅ same product + SAME variant hole ek line, kintu same product +
+    // ALADA variant (jemon Large ar Small) hole alada alada cart line hobe
     const existing = cart.items.find(
       (i) =>
         String(i.productId) === String(product._id) &&
-        (i.size ?? null) === sizeResult.value &&
-        (i.weight ?? null) === weightResult.value,
+        String(i.variantId) === String(variant._id),
     );
 
     const newQuantity = (existing?.quantity ?? 0) + quantity;
@@ -252,21 +227,18 @@ const addToCart = async (req, res) => {
       });
     }
 
+    const snapshot = toSnapshot(product, variant);
+
     if (existing) {
-      existing.set({
-        ...toSnapshot(product),
-        storeName: store.storeName,
-        quantity: newQuantity,
-      });
+      existing.set({ ...snapshot, storeName: store.storeName, quantity: newQuantity });
     } else {
       cart.items.push({
         productId: product._id,
+        variantId: variant._id,
         storeId: product.storeId,
         storeName: store.storeName,
         quantity,
-        size: sizeResult.value,
-        weight: weightResult.value,
-        ...toSnapshot(product),
+        ...snapshot,
       });
     }
 
@@ -283,7 +255,6 @@ const addToCart = async (req, res) => {
 };
 
 // ===================== 2. GET CART (store wise) =====================
-// GET /cart
 const getCart = async (req, res) => {
   try {
     const cart = await CartModel.findOne({ userId: getUserId(req) });
@@ -294,7 +265,6 @@ const getCart = async (req, res) => {
 };
 
 // ===================== 3. UPDATE ITEM QUANTITY =====================
-// PATCH /cart/items/:itemId   body: { quantity }
 const updateCartItem = async (req, res) => {
   try {
     const userId = getUserId(req);
@@ -317,14 +287,17 @@ const updateCartItem = async (req, res) => {
       isActive: true,
       isVerified: true,
     }).lean();
-    if (!product) {
+
+    const variant = product ? findActiveVariant(product, item.variantId) : null;
+
+    if (!product || !variant) {
       return res.status(400).json({
         success: false,
         message: "This product is no longer available. Please remove it from your cart.",
       });
     }
 
-    item.set({ ...toSnapshot(product), quantity }); // snapshot o refresh hoy
+    item.set({ ...toSnapshot(product, variant), quantity });
     await cart.save();
 
     return res.status(200).json({
@@ -338,7 +311,6 @@ const updateCartItem = async (req, res) => {
 };
 
 // ===================== 4. REMOVE ITEM =====================
-// DELETE /cart/items/:itemId
 const removeCartItem = async (req, res) => {
   try {
     const { itemId } = req.params;
@@ -364,7 +336,6 @@ const removeCartItem = async (req, res) => {
 };
 
 // ===================== 5. REMOVE ALL ITEMS OF ONE STORE =====================
-// DELETE /cart/stores/:storeId
 const removeStoreItems = async (req, res) => {
   try {
     const { storeId } = req.params;
@@ -390,7 +361,6 @@ const removeStoreItems = async (req, res) => {
 };
 
 // ===================== 6. CLEAR CART =====================
-// DELETE /cart
 const clearCart = async (req, res) => {
   try {
     await CartModel.updateOne({ userId: getUserId(req) }, { $set: { items: [] } });
@@ -407,5 +377,5 @@ module.exports = {
   removeCartItem,
   removeStoreItems,
   clearCart,
-  serializeCart, // profile controller e lagbe
+  serializeCart,
 };

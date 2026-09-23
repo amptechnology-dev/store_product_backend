@@ -1378,20 +1378,14 @@ const nearbyStores = async (req, res) => {
 const registerUser = async (req, res) => {
   try {
     const parsedData = createUserSchema.parse(req.body);
-
     const email = parsedData.email.trim().toLowerCase();
-
     const existingUser = await UserModel.findOne({ email });
     if (existingUser) {
       return res
         .status(409)
         .json({ success: false, message: "Email already in use" });
     }
-
     const hashedPassword = await bcrypt.hash(parsedData.password, 10);
-
-    // fields explicitly deoa hoyeche, tai body te role/isVerified/googleId
-    // pathiye kew privilege escalate korte parbe na
     const user = await UserModel.create({
       name: parsedData.name.trim(),
       email,
@@ -1399,10 +1393,9 @@ const registerUser = async (req, res) => {
       password: hashedPassword,
       role: "USER",
       provider: "LOCAL",
-      isVerified: false,
+      isVerified: true,
+      address: parsedData.address,
     });
-
-    // OTP mail fail hole o registration successful thakbe
     let otpSent = true;
     try {
       await sendEmailVerificationOTP(req, user);
@@ -1410,9 +1403,7 @@ const registerUser = async (req, res) => {
       otpSent = false;
       console.error("Verification OTP email error:", mailError);
     }
-
     const { password: _password, ...safeUser } = user.toObject();
-
     return res.status(201).json({
       success: true,
       message: otpSent
@@ -1431,14 +1422,21 @@ const registerUser = async (req, res) => {
         })),
       });
     }
-
-    // race condition: duplicate check pass korar por o same email ashle
+    if (error.name === "ValidationError") {
+      return res.status(400).json({
+        success: false,
+        message: "Validation failed",
+        errors: Object.values(error.errors).map((e) => ({
+          field: e.path,
+          message: e.message,
+        })),
+      });
+    }
     if (error.code === 11000 && error.keyPattern?.email) {
       return res
         .status(409)
         .json({ success: false, message: "Email already in use" });
     }
-
     console.error("User registration error:", error);
     return res
       .status(500)

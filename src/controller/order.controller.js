@@ -5,7 +5,8 @@ const ProductModel = require("../model/product.model.js");
 const StoreModel = require("../model/store.model.js");
 const {
   ORDER_STATUSES,
-  checkoutSchema,
+  cartCheckoutSchema,
+  directCheckoutSchema,
   cancelOrderSchema,
   updateOrderStatusSchema,
 } = require("../schema/order.schema.js");
@@ -24,7 +25,6 @@ const getPagination = (query) => {
   return { page, limit, skip: (page - 1) * limit };
 };
 
-// kon status theke kon status e jawa jabe (single source of truth)
 const ALLOWED_FROM = {
   CONFIRMED: ["PENDING"],
   SHIPPED: ["CONFIRMED"],
@@ -47,11 +47,16 @@ const handleError = (res, error, label) => {
     return res.status(400).json({
       success: false,
       message: "Validation failed",
-      errors: Object.values(error.errors).map((e) => ({ field: e.path, message: e.message })),
+      errors: Object.values(error.errors).map((e) => ({
+        field: e.path,
+        message: e.message,
+      })),
     });
   }
   console.error(`${label}:`, error);
-  return res.status(500).json({ success: false, message: "Internal server error" });
+  return res
+    .status(500)
+    .json({ success: false, message: "Internal server error" });
 };
 
 const parseStatus = (value) => {
@@ -77,8 +82,16 @@ const paginated = ({ page, limit, total, orders }) => ({
   orders,
 });
 
-// user er order gulo store wise group kore (profile + /my-orders/by-store duto jayga theke use hoy)
-const getOrdersGroupedByStore = async (userId, { status, ordersPerStore = 5 } = {}) => {
+// product-er variants array theke ekta specific active variant khoja
+const findActiveVariant = (product, variantId) =>
+  (product?.variants || []).find(
+    (v) => String(v._id) === String(variantId) && v.isActive !== false,
+  );
+
+const getOrdersGroupedByStore = async (
+  userId,
+  { status, ordersPerStore = 5 } = {},
+) => {
   const match = { userId: new mongoose.Types.ObjectId(String(userId)) };
   if (status) match.status = status;
 
@@ -91,9 +104,10 @@ const getOrdersGroupedByStore = async (userId, { status, ordersPerStore = 5 } = 
         storeName: { $first: "$storeName" },
         storeUniqueId: { $first: "$storeUniqueId" },
         totalOrders: { $sum: 1 },
-        // cancelled order er taka dhora hoy na
         totalSpent: {
-          $sum: { $cond: [{ $eq: ["$status", "CANCELLED"] }, 0, "$totalAmount"] },
+          $sum: {
+            $cond: [{ $eq: ["$status", "CANCELLED"] }, 0, "$totalAmount"],
+          },
         },
         lastOrderAt: { $first: "$createdAt" },
         orders: {
@@ -140,19 +154,21 @@ const getOrdersGroupedByStore = async (userId, { status, ordersPerStore = 5 } = 
 const checkout = async (req, res) => {
   try {
     const userId = getUserId(req);
-    const { cartId, storeIds, deliveryAddress, note, paymentMethod } = checkoutSchema.parse(
-      req.body,
-    );
+    const { cartId, storeIds, deliveryAddress, note, paymentMethod } =
+      cartCheckoutSchema.parse(req.body);
 
     const cart = await CartModel.findOne({ _id: cartId, userId });
     if (!cart) {
-      return res.status(404).json({ success: false, message: "Cart not found" });
+      return res
+        .status(404)
+        .json({ success: false, message: "Cart not found" });
     }
     if (cart.items.length === 0) {
-      return res.status(400).json({ success: false, message: "Your cart is empty" });
+      return res
+        .status(400)
+        .json({ success: false, message: "Your cart is empty" });
     }
 
-    // ---- kon kon item order hobe ----
     let selectedItems = cart.items;
 
     if (storeIds?.length) {
@@ -170,7 +186,9 @@ const checkout = async (req, res) => {
       }
     }
 
-    const selectedStoreIds = [...new Set(selectedItems.map((i) => String(i.storeId)))];
+    const selectedStoreIds = [
+      ...new Set(selectedItems.map((i) => String(i.storeId))),
+    ];
 
     const [stores, products] = await Promise.all([
       StoreModel.find({ _id: { $in: selectedStoreIds }, isActive: true })
@@ -181,43 +199,45 @@ const checkout = async (req, res) => {
         isActive: true,
         isVerified: true,
       })
-        .select("storeId name productCode images unit mrp offerPrice")
+        .select("storeId name productCode images unit variants")
         .lean(),
     ]);
 
     const storeMap = new Map(stores.map((s) => [String(s._id), s]));
     const productMap = new Map(products.map((p) => [String(p._id), p]));
 
-    const isAvailable = (item) => {
+    // item-er live product + live (active) variant ber kora
+    const getLiveVariant = (item) => {
       const p = productMap.get(String(item.productId));
-      return Boolean(
-        p && String(p.storeId) === String(item.storeId) && storeMap.has(String(item.storeId)),
-      );
+      if (
+        !p ||
+        String(p.storeId) !== String(item.storeId) ||
+        !storeMap.has(String(item.storeId))
+      ) {
+        return null;
+      }
+      const variant = findActiveVariant(p, item.variantId);
+      return variant ? { product: p, variant } : null;
     };
 
-    const unavailableItems = selectedItems.filter((i) => !isAvailable(i)).map((i) => ({
-      itemId: i._id,
-      storeId: i.storeId,
-      storeName: i.storeName ?? null,
-      name: i.name,
-    }));
-
-    if (unavailableItems.length) {
-      return res.status(409).json({
-        success: false,
-        message:
-          "Some items are no longer available. Remove them from your cart or order other stores only (storeIds).",
-        unavailableItems,
-      });
-    }
-
-    // ---- store wise group + price (live product theke, cart er purano price theke na) ----
+    const unavailableItems = [];
     const groups = new Map();
 
     for (const item of selectedItems) {
+      const live = getLiveVariant(item);
+      if (!live) {
+        unavailableItems.push({
+          itemId: item._id,
+          storeId: item.storeId,
+          storeName: item.storeName ?? null,
+          name: item.name,
+        });
+        continue;
+      }
+
+      const { product: p, variant } = live;
       const key = String(item.storeId);
-      const p = productMap.get(String(item.productId));
-      const lineTotal = round2(p.offerPrice * item.quantity);
+      const lineTotal = round2(variant.offerPrice * item.quantity);
 
       if (!groups.has(key)) {
         groups.set(key, {
@@ -232,23 +252,33 @@ const checkout = async (req, res) => {
 
       group.items.push({
         productId: p._id,
+        variantId: variant._id,
         name: p.name,
         productCode: p.productCode,
         image: p.images?.[0] ?? null,
         unit: p.unit,
-        size: item.size,
-        weight: item.weight,
-        mrp: p.mrp,
-        offerPrice: p.offerPrice,
+        size: variant.size ?? null,
+        weight: variant.weight ?? null,
+        mrp: variant.mrp,
+        offerPrice: variant.offerPrice,
         quantity: item.quantity,
         lineTotal,
       });
       group.totalItems += item.quantity;
-      group.totalMrp += p.mrp * item.quantity;
+      group.totalMrp += variant.mrp * item.quantity;
       group.totalAmount += lineTotal;
     }
 
-    // ---- cart theke selected item atomically "claim" (double click e duplicate order bondho) ----
+    if (unavailableItems.length) {
+      return res.status(409).json({
+        success: false,
+        message:
+          "Some items are no longer available. Remove them from your cart or order other stores only (storeIds).",
+        unavailableItems,
+      });
+    }
+
+    // ---- cart theke selected item atomically "claim" ----
     const removedItems = selectedItems.map((i) => i.toObject());
 
     const claim = await CartModel.updateOne(
@@ -256,7 +286,11 @@ const checkout = async (req, res) => {
       {
         $pull: {
           items: {
-            storeId: { $in: selectedStoreIds.map((id) => new mongoose.Types.ObjectId(id)) },
+            storeId: {
+              $in: selectedStoreIds.map(
+                (id) => new mongoose.Types.ObjectId(id),
+              ),
+            },
           },
         },
       },
@@ -268,7 +302,6 @@ const checkout = async (req, res) => {
       });
     }
 
-    // ---- prottek store er jonno ekta order ----
     const checkoutId = new mongoose.Types.ObjectId();
     const orders = [];
 
@@ -300,7 +333,6 @@ const checkout = async (req, res) => {
         orders.push(order);
       }
     } catch (createError) {
-      // kono ekta fail hole: toiri hoya order delete + cart item ferot
       try {
         await OrderModel.deleteMany({ _id: { $in: orders.map((o) => o._id) } });
         await CartModel.updateOne(
@@ -329,8 +361,104 @@ const checkout = async (req, res) => {
   }
 };
 
+// ===================== USER: BUY NOW (cart chara direct order, ekta product + variant) =====================
+// POST /order/buy-now
+// body: { productId, variantId, quantity?, deliveryAddress: {...}, note?, paymentMethod? }
+const buyNow = async (req, res) => {
+  try {
+    const userId = getUserId(req);
+    const {
+      productId,
+      variantId,
+      quantity,
+      deliveryAddress,
+      note,
+      paymentMethod,
+    } = directCheckoutSchema.parse(req.body);
+
+    const product = await ProductModel.findOne({
+      _id: productId,
+      isActive: true,
+      isVerified: true,
+    })
+      .select("storeId name productCode images unit variants")
+      .lean();
+    if (!product) {
+      return res
+        .status(404)
+        .json({ success: false, message: "Product not available" });
+    }
+
+    const variant = findActiveVariant(product, variantId);
+    if (!variant) {
+      return res
+        .status(404)
+        .json({
+          success: false,
+          message: "Selected size/weight is not available",
+        });
+    }
+
+    const store = await StoreModel.findOne({
+      _id: product.storeId,
+      isActive: true,
+    })
+      .select("storeName storeUniqueId")
+      .lean();
+    if (!store) {
+      return res
+        .status(400)
+        .json({ success: false, message: "Store is currently unavailable" });
+    }
+
+    const totalMrp = round2(variant.mrp * quantity);
+    const totalAmount = round2(variant.offerPrice * quantity);
+
+    const order = await OrderModel.create({
+      cartId: null, // ✅ cart chara direct order, tai cartId null thakbe
+      checkoutId: new mongoose.Types.ObjectId(),
+      userId,
+      storeId: product.storeId,
+      storeName: store.storeName,
+      storeUniqueId: store.storeUniqueId,
+      items: [
+        {
+          productId: product._id,
+          variantId: variant._id,
+          name: product.name,
+          productCode: product.productCode,
+          image: product.images?.[0] ?? null,
+          unit: product.unit,
+          size: variant.size ?? null,
+          weight: variant.weight ?? null,
+          mrp: variant.mrp,
+          offerPrice: variant.offerPrice,
+          quantity,
+          lineTotal: totalAmount,
+        },
+      ],
+      totalItems: quantity,
+      totalMrp,
+      discount: round2(totalMrp - totalAmount),
+      totalAmount,
+      deliveryAddress,
+      note: note || null,
+      paymentMethod,
+      status: "PENDING",
+      statusHistory: [{ status: "PENDING", changedBy: userId }],
+    });
+
+    return res.status(201).json({
+      success: true,
+      message: "Order placed successfully",
+      order,
+    });
+  } catch (error) {
+    return handleError(res, error, "Buy Now Error");
+  }
+};
+
 // ===================== USER: MY ORDERS (flat list) =====================
-// GET /order/my-orders?status=&storeId=&checkoutId=&page=&limit=
 const getMyOrders = async (req, res) => {
   try {
     const userId = getUserId(req);
@@ -347,13 +475,17 @@ const getMyOrders = async (req, res) => {
     const { storeId, checkoutId } = req.query;
     if (storeId) {
       if (!mongoose.isValidObjectId(storeId)) {
-        return res.status(400).json({ success: false, message: "Invalid store id" });
+        return res
+          .status(400)
+          .json({ success: false, message: "Invalid store id" });
       }
       filter.storeId = storeId;
     }
     if (checkoutId) {
       if (!mongoose.isValidObjectId(checkoutId)) {
-        return res.status(400).json({ success: false, message: "Invalid checkout id" });
+        return res
+          .status(400)
+          .json({ success: false, message: "Invalid checkout id" });
       }
       filter.checkoutId = checkoutId;
     }
@@ -375,7 +507,6 @@ const getMyOrders = async (req, res) => {
 };
 
 // ===================== USER: MY ORDERS (store wise) =====================
-// GET /order/my-orders/by-store?status=&ordersPerStore=5
 const getMyOrdersByStore = async (req, res) => {
   try {
     const parsed = parseStatus(req.query.status);
@@ -383,7 +514,10 @@ const getMyOrdersByStore = async (req, res) => {
       return res.status(400).json({ success: false, message: parsed.error });
     }
 
-    const ordersPerStore = Math.min(Math.max(parseInt(req.query.ordersPerStore) || 5, 1), 20);
+    const ordersPerStore = Math.min(
+      Math.max(parseInt(req.query.ordersPerStore) || 5, 1),
+      20,
+    );
 
     const result = await getOrdersGroupedByStore(getUserId(req), {
       status: parsed.status,
@@ -397,20 +531,29 @@ const getMyOrdersByStore = async (req, res) => {
 };
 
 // ===================== USER: SINGLE ORDER =====================
-// GET /order/my-orders/:orderId
 const getMyOrderById = async (req, res) => {
   try {
     const { orderId } = req.params;
     if (!mongoose.isValidObjectId(orderId)) {
-      return res.status(400).json({ success: false, message: "Invalid order id" });
+      return res
+        .status(400)
+        .json({ success: false, message: "Invalid order id" });
     }
 
-    const order = await OrderModel.findOne({ _id: orderId, userId: getUserId(req) })
-      .populate("storeId", "storeName storeUniqueId contactNo whatsappNo address")
+    const order = await OrderModel.findOne({
+      _id: orderId,
+      userId: getUserId(req),
+    })
+      .populate(
+        "storeId",
+        "storeName storeUniqueId contactNo whatsappNo address",
+      )
       .lean();
 
     if (!order) {
-      return res.status(404).json({ success: false, message: "Order not found" });
+      return res
+        .status(404)
+        .json({ success: false, message: "Order not found" });
     }
 
     return res.status(200).json({ success: true, order });
@@ -420,22 +563,26 @@ const getMyOrderById = async (req, res) => {
 };
 
 // ===================== USER: CANCEL ORDER =====================
-// PATCH /order/my-orders/:orderId/cancel   body: { reason? }
 const cancelMyOrder = async (req, res) => {
   try {
     const userId = getUserId(req);
     const { orderId } = req.params;
     if (!mongoose.isValidObjectId(orderId)) {
-      return res.status(400).json({ success: false, message: "Invalid order id" });
+      return res
+        .status(400)
+        .json({ success: false, message: "Invalid order id" });
     }
 
     const { reason } = cancelOrderSchema.parse(req.body);
 
-    // status check + update ekshathe atomic
     const order = await OrderModel.findOneAndUpdate(
       { _id: orderId, userId, status: { $in: ALLOWED_FROM.CANCELLED } },
       {
-        $set: { status: "CANCELLED", cancelledBy: "USER", cancelReason: reason || null },
+        $set: {
+          status: "CANCELLED",
+          cancelledBy: "USER",
+          cancelReason: reason || null,
+        },
         $push: {
           statusHistory: {
             status: "CANCELLED",
@@ -451,7 +598,9 @@ const cancelMyOrder = async (req, res) => {
     if (!order) {
       const exists = await OrderModel.exists({ _id: orderId, userId });
       if (!exists) {
-        return res.status(404).json({ success: false, message: "Order not found" });
+        return res
+          .status(404)
+          .json({ success: false, message: "Order not found" });
       }
       return res.status(400).json({
         success: false,
@@ -470,8 +619,6 @@ const cancelMyOrder = async (req, res) => {
 };
 
 // ===================== STORE: ORDER LIST =====================
-// GET /order/store-orders?status=&storeId=&search=&page=&limit=
-// search -> orderNumber / customer name / phone
 const getStoreOrders = async (req, res) => {
   try {
     const userId = getUserId(req);
@@ -479,16 +626,19 @@ const getStoreOrders = async (req, res) => {
 
     const ownedStoreIds = await getOwnedStoreIds(userId);
     if (!ownedStoreIds.length) {
-      return res.status(200).json(paginated({ page, limit, total: 0, orders: [] }));
+      return res
+        .status(200)
+        .json(paginated({ page, limit, total: 0, orders: [] }));
     }
 
     const filter = { storeId: { $in: ownedStoreIds } };
 
-    // ekadhik store thakle specific store filter
     if (req.query.storeId) {
       const { storeId } = req.query;
       if (!mongoose.isValidObjectId(storeId)) {
-        return res.status(400).json({ success: false, message: "Invalid store id" });
+        return res
+          .status(400)
+          .json({ success: false, message: "Invalid store id" });
       }
       if (!ownedStoreIds.some((id) => String(id) === storeId)) {
         return res.status(403).json({ success: false, message: "Forbidden" });
@@ -530,22 +680,28 @@ const getStoreOrders = async (req, res) => {
 };
 
 // ===================== STORE: SINGLE ORDER =====================
-// GET /order/store-orders/:orderId
 const getStoreOrderById = async (req, res) => {
   try {
     const { orderId } = req.params;
     if (!mongoose.isValidObjectId(orderId)) {
-      return res.status(400).json({ success: false, message: "Invalid order id" });
+      return res
+        .status(400)
+        .json({ success: false, message: "Invalid order id" });
     }
 
     const ownedStoreIds = await getOwnedStoreIds(getUserId(req));
 
-    const order = await OrderModel.findOne({ _id: orderId, storeId: { $in: ownedStoreIds } })
+    const order = await OrderModel.findOne({
+      _id: orderId,
+      storeId: { $in: ownedStoreIds },
+    })
       .populate("userId", "name email phone")
       .lean();
 
     if (!order) {
-      return res.status(404).json({ success: false, message: "Order not found" });
+      return res
+        .status(404)
+        .json({ success: false, message: "Order not found" });
     }
 
     return res.status(200).json({ success: true, order });
@@ -555,20 +711,21 @@ const getStoreOrderById = async (req, res) => {
 };
 
 // ===================== STORE: UPDATE STATUS =====================
-// PATCH /order/store-orders/:orderId/status   body: { status, note? }
 const updateOrderStatus = async (req, res) => {
   try {
     const userId = getUserId(req);
     const { orderId } = req.params;
     if (!mongoose.isValidObjectId(orderId)) {
-      return res.status(400).json({ success: false, message: "Invalid order id" });
+      return res
+        .status(400)
+        .json({ success: false, message: "Invalid order id" });
     }
 
     const { status, note } = updateOrderStatusSchema.parse(req.body);
     const ownedStoreIds = await getOwnedStoreIds(userId);
 
     const set = { status };
-    if (status === "DELIVERED") set.paymentStatus = "PAID"; // COD: delivery te taka pay
+    if (status === "DELIVERED") set.paymentStatus = "PAID";
     if (status === "CANCELLED") {
       set.cancelledBy = "STORE";
       set.cancelReason = note || null;
@@ -583,7 +740,12 @@ const updateOrderStatus = async (req, res) => {
       {
         $set: set,
         $push: {
-          statusHistory: { status, changedBy: userId, note: note || null, at: new Date() },
+          statusHistory: {
+            status,
+            changedBy: userId,
+            note: note || null,
+            at: new Date(),
+          },
         },
       },
       { new: true },
@@ -598,7 +760,9 @@ const updateOrderStatus = async (req, res) => {
         .lean();
 
       if (!current) {
-        return res.status(404).json({ success: false, message: "Order not found" });
+        return res
+          .status(404)
+          .json({ success: false, message: "Order not found" });
       }
       return res.status(400).json({
         success: false,
@@ -618,6 +782,7 @@ const updateOrderStatus = async (req, res) => {
 
 module.exports = {
   checkout,
+  buyNow,
   getMyOrders,
   getMyOrdersByStore,
   getMyOrderById,
@@ -625,5 +790,5 @@ module.exports = {
   getStoreOrders,
   getStoreOrderById,
   updateOrderStatus,
-  getOrdersGroupedByStore, // profile controller e lagbe
+  getOrdersGroupedByStore,
 };
