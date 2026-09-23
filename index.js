@@ -38,6 +38,7 @@ const cartRoutes = require("./src/routes/cart.routes.js");
 const orderRoutes = require("./src/routes/order.routes.js");
 const profileRoutes = require("./src/routes/profile.routes.js");
 const storeurlroutes = require("./src/routes/storeURL.routes.js");
+const dashboardroutes = require("./src/routes/dashboard.routes.js");
 
 app.use("/api/register", registerRoutes);
 app.use("/api/login", loginRoutes);
@@ -50,7 +51,7 @@ app.use("/api/cart", cartRoutes);
 app.use("/api/order", orderRoutes);
 app.use("/api/profile", profileRoutes);
 app.use("/store", storeurlroutes);
-// app.use("/api/dashboard", dashboardRoutes)
+app.use("/api/dashboard", dashboardRoutes);
 
 const port = process.env.PORT || 8090;
 

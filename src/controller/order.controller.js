@@ -10,6 +10,11 @@ const {
   cancelOrderSchema,
   updateOrderStatusSchema,
 } = require("../schema/order.schema.js");
+const {
+  sendNewOrderEmailToStore,
+  sendOrderConfirmationToUser,
+  sendOrderStatusUpdateToUser,
+} = require("../helper/orderMail.js");
 
 // ===================== HELPERS =====================
 
@@ -148,9 +153,6 @@ const getOrdersGroupedByStore = async (
   };
 };
 
-// ===================== USER: CHECKOUT (cart -> store wise orders) =====================
-// POST /order/checkout
-// body: { cartId, storeIds?, deliveryAddress: {...}, note?, paymentMethod? }
 const checkout = async (req, res) => {
   try {
     const userId = getUserId(req);
@@ -192,7 +194,7 @@ const checkout = async (req, res) => {
 
     const [stores, products] = await Promise.all([
       StoreModel.find({ _id: { $in: selectedStoreIds }, isActive: true })
-        .select("storeName storeUniqueId")
+        .select("storeName storeUniqueId email") // 👈 email add holo
         .lean(),
       ProductModel.find({
         _id: { $in: selectedItems.map((i) => i.productId) },
@@ -345,6 +347,21 @@ const checkout = async (req, res) => {
       throw createError;
     }
 
+    // ---- Email notifications (non-blocking, fire-and-forget) ----
+    for (const order of orders) {
+      const store = storeMap.get(String(order.storeId));
+      sendNewOrderEmailToStore({
+        toEmail: store?.email,
+        storeName: order.storeName,
+        order,
+      });
+    }
+    sendOrderConfirmationToUser({
+      toEmail: req.user?.email,
+      userName: req.user?.name,
+      orders,
+    });
+
     return res.status(201).json({
       success: true,
       message:
@@ -361,9 +378,6 @@ const checkout = async (req, res) => {
   }
 };
 
-// ===================== USER: BUY NOW (cart chara direct order, ekta product + variant) =====================
-// POST /order/buy-now
-// body: { productId, variantId, quantity?, deliveryAddress: {...}, note?, paymentMethod? }
 const buyNow = async (req, res) => {
   try {
     const userId = getUserId(req);
@@ -403,7 +417,7 @@ const buyNow = async (req, res) => {
       _id: product.storeId,
       isActive: true,
     })
-      .select("storeName storeUniqueId")
+      .select("storeName storeUniqueId email") // 👈 email add holo
       .lean();
     if (!store) {
       return res
@@ -446,6 +460,18 @@ const buyNow = async (req, res) => {
       paymentMethod,
       status: "PENDING",
       statusHistory: [{ status: "PENDING", changedBy: userId }],
+    });
+
+    // ---- Email notifications (non-blocking, fire-and-forget) ----
+    sendNewOrderEmailToStore({
+      toEmail: store?.email,
+      storeName: order.storeName,
+      order,
+    });
+    sendOrderConfirmationToUser({
+      toEmail: req.user?.email,
+      userName: req.user?.name,
+      orders: [order],
     });
 
     return res.status(201).json({
@@ -562,7 +588,6 @@ const getMyOrderById = async (req, res) => {
   }
 };
 
-// ===================== USER: CANCEL ORDER =====================
 const cancelMyOrder = async (req, res) => {
   try {
     const userId = getUserId(req);
@@ -607,6 +632,14 @@ const cancelMyOrder = async (req, res) => {
         message: "This order can no longer be cancelled",
       });
     }
+
+    // ---- Email notification (non-blocking, fire-and-forget) ----
+    sendOrderStatusUpdateToUser({
+      toEmail: req.user?.email,
+      userName: req.user?.name,
+      order,
+      status: "CANCELLED",
+    });
 
     return res.status(200).json({
       success: true,
@@ -710,7 +743,6 @@ const getStoreOrderById = async (req, res) => {
   }
 };
 
-// ===================== STORE: UPDATE STATUS =====================
 const updateOrderStatus = async (req, res) => {
   try {
     const userId = getUserId(req);
@@ -749,7 +781,9 @@ const updateOrderStatus = async (req, res) => {
         },
       },
       { new: true },
-    ).lean();
+    )
+      .populate("userId", "name email") // 👈 user email er jonno add holo
+      .lean();
 
     if (!order) {
       const current = await OrderModel.findOne({
@@ -769,6 +803,14 @@ const updateOrderStatus = async (req, res) => {
         message: `Cannot change order status from ${current.status} to ${status}`,
       });
     }
+
+    // ---- Email notification (non-blocking, fire-and-forget) ----
+    sendOrderStatusUpdateToUser({
+      toEmail: order.userId?.email,
+      userName: order.userId?.name,
+      order,
+      status,
+    });
 
     return res.status(200).json({
       success: true,

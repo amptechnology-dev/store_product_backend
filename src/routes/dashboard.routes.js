@@ -1,7 +1,11 @@
-// const router = require("express").Router();
-// const verifyJwt = require("../middleware/verifiyUser.js");
-// const { getDashboard } = require("../controller/dashboard.controller.js")
+const router = require("express").Router();
 
-// router.get("/dashboard-stats", verifyJwt, getDashboard);
+const verifyJwt = require("../middleware/verifiyUser.js");
+const authorize = require("../middleware/authorize.js");
 
-// module.exports = router
+const { adminDashboard, storeDashboard } = require("../controller/dashboard.controller.js");
+
+router.get("/admin", verifyJwt, authorize("ADMIN"), adminDashboard);
+router.get("/store", verifyJwt, authorize("STORE"), storeDashboard);
+
+module.exports = router;

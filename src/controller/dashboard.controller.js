@@ -1,384 +1,316 @@
 const mongoose = require("mongoose");
-
-const User = require("../model/user.model");
-const Worker = require("../model/worker.model");
-const Product = require("../model/product.model");
-const Tank = require("../model/tank.model");
-const Nozzle = require("../model/nozzel.model");
-const Supplier = require("../model/supplier.model");
-
-const CurrentStock = require("../model/currentStock.model");
-
-const { PurchaseModel } = require("../model/purchase.model");
-const SalesModel = require("../model/sales.model");
-const TransactionModel = require("../model/transaction.model");
-
-const getDashboard = async (req, res) => {
-
-    try {
-
-        const userId = req.user?._id;
-        const role = req.user?.role;
-
-        if (!userId) {
-            return res.status(401).json({
-                success: false,
-                message: "Unauthorized"
-            });
-        }
-
-        const objectUserId = new mongoose.Types.ObjectId(userId);
-
-        // ======================
-        // DATE FILTERS
-        // ======================
-
-        const todayStart = new Date();
-        todayStart.setHours(0,0,0,0);
-
-        const monthStart = new Date();
-        monthStart.setDate(1);
-        monthStart.setHours(0,0,0,0);
-
-        // ======================
-        // TOTAL COUNTS
-        // ======================
-
-        const countsPromise = Promise.all([
-
-            User.countDocuments({ createdBy: userId }),
-            Worker.countDocuments({ createdBy: userId }),
-            Product.countDocuments({ userId }),
-            Tank.countDocuments({ userId }),
-            Nozzle.countDocuments({ userId }),
-            Supplier.countDocuments({ userId })
-
-        ]);
-
-        // ======================
-        // SALES SUMMARY
-        // ======================
-
-        const salesSummaryPromise = SalesModel.aggregate([
-
-            { $match: { userId: objectUserId } },
-
-            {
-                $group: {
-                    _id: null,
-                    totalSales: { $sum: "$totalAmount" },
-                    totalLitres: { $sum: "$totalLitres" },
-                    totalQty: { $sum: "$totalQty" }
-                }
-            }
-
-        ]);
-
-        const todaySalesPromise = SalesModel.aggregate([
-
-            {
-                $match: {
-                    userId: objectUserId,
-                    createdAt: { $gte: todayStart }
-                }
-            },
-
-            {
-                $group: {
-                    _id: null,
-                    total: { $sum: "$totalAmount" }
-                }
-            }
-
-        ]);
-
-        const monthlySalesPromise = SalesModel.aggregate([
-
-            {
-                $match: {
-                    userId: objectUserId,
-                    createdAt: { $gte: monthStart }
-                }
-            },
-
-            {
-                $group: {
-                    _id: null,
-                    total: { $sum: "$totalAmount" }
-                }
-            }
-
-        ]);
-
-        // ======================
-        // PURCHASE SUMMARY
-        // ======================
-
-        const purchaseSummaryPromise = PurchaseModel.aggregate([
-
-            { $match: { createdBy: objectUserId } },
-
-            {
-                $group: {
-                    _id: null,
-                    totalPurchase: { $sum: "$totalAmount" },
-                    totalPaid: { $sum: "$paidAmount" },
-                    totalDue: { $sum: "$dueAmount" }
-                }
-            }
-
-        ]);
-
-        const todayPurchasePromise = PurchaseModel.aggregate([
-
-            {
-                $match: {
-                    createdBy: objectUserId,
-                    purchaseDate: { $gte: todayStart }
-                }
-            },
-
-            {
-                $group: {
-                    _id: null,
-                    total: { $sum: "$totalAmount" }
-                }
-            }
-
-        ]);
-
-        const monthlyPurchasePromise = PurchaseModel.aggregate([
-
-            {
-                $match: {
-                    createdBy: objectUserId,
-                    purchaseDate: { $gte: monthStart }
-                }
-            },
-
-            {
-                $group: {
-                    _id: null,
-                    total: { $sum: "$totalAmount" }
-                }
-            }
-
-        ]);
-
-        // ======================
-        // STOCK SUMMARY
-        // ======================
-
-        const stockSummaryPromise = CurrentStock.aggregate([
-
-            { $match: { userId: objectUserId } },
-
-            {
-                $group: {
-                    _id: null,
-                    totalStock: { $sum: "$quantity" }
-                }
-            }
-
-        ]);
-
-        // ======================
-        // INCOME EXPENSE
-        // ======================
-
-        const transactionSummaryPromise = TransactionModel.aggregate([
-
-            { $match: { userId: objectUserId } },
-
-            {
-                $group: {
-                    _id: "$type",
-                    total: { $sum: "$amount" }
-                }
-            }
-
-        ]);
-
-        // ======================
-        // RECENT SALES
-        // ======================
-
-        const recentSalesPromise = SalesModel.aggregate([
-
-            { $match: { userId: objectUserId } },
-
-            { $sort: { createdAt: -1 } },
-
-            { $limit: 5 },
-
-            {
-                $project: {
-                    invoiceNumber: 1,
-                    totalAmount: 1,
-                    totalLitres: 1,
-                    createdAt: 1
-                }
-            }
-
-        ]);
-
-        // ======================
-        // RECENT PURCHASES
-        // ======================
-
-        const recentPurchasesPromise = PurchaseModel.aggregate([
-
-            { $match: { createdBy: objectUserId } },
-
-            { $sort: { createdAt: -1 } },
-
-            { $limit: 5 },
-
-            {
-                $lookup: {
-                    from: "suppliers",
-                    localField: "supplierId",
-                    foreignField: "_id",
-                    as: "supplier"
-                }
-            },
-
-            { $unwind: { path: "$supplier", preserveNullAndEmptyArrays: true } },
-
-            {
-                $project: {
-                    invoiceNo: 1,
-                    totalAmount: 1,
-                    purchaseDate: 1,
-                    supplierName: "$supplier.name"
-                }
-            }
-
-        ]);
-
-        // ======================
-        // EXECUTE ALL
-        // ======================
-
-        const [
-
-            counts,
-            salesSummary,
-            todaySales,
-            monthlySales,
-            purchaseSummary,
-            todayPurchase,
-            monthlyPurchase,
-            stockSummary,
-            transactionSummary,
-            recentSales,
-            recentPurchases
-
-        ] = await Promise.all([
-
-            countsPromise,
-            salesSummaryPromise,
-            todaySalesPromise,
-            monthlySalesPromise,
-            purchaseSummaryPromise,
-            todayPurchasePromise,
-            monthlyPurchasePromise,
-            stockSummaryPromise,
-            transactionSummaryPromise,
-            recentSalesPromise,
-            recentPurchasesPromise
-
-        ]);
-
-        // ======================
-        // FORMAT TRANSACTION
-        // ======================
-
-        let income = 0;
-        let expense = 0;
-
-        transactionSummary.forEach(t => {
-
-            if (t._id === "INCOME") income = t.total;
-            if (t._id === "EXPENSE") expense = t.total;
-
-        });
-
-        // ======================
-        // FINAL RESPONSE
-        // ======================
-
-        const dashboard = {
-
-            totals: {
-
-                totalUsers: counts[0],
-                totalWorkers: counts[1],
-                totalProducts: counts[2],
-                totalTanks: counts[3],
-                totalNozzles: counts[4],
-                totalSuppliers: counts[5]
-
-            },
-
-            sales: {
-
-                totalSalesAmount: salesSummary?.[0]?.totalSales || 0,
-                totalLitresSold: salesSummary?.[0]?.totalLitres || 0,
-                totalProductsSold: salesSummary?.[0]?.totalQty || 0,
-
-                todaySales: todaySales?.[0]?.total || 0,
-                monthlySales: monthlySales?.[0]?.total || 0
-
-            },
-
-            purchase: {
-
-                totalPurchaseAmount: purchaseSummary?.[0]?.totalPurchase || 0,
-                totalPaid: purchaseSummary?.[0]?.totalPaid || 0,
-                totalDue: purchaseSummary?.[0]?.totalDue || 0,
-
-                todayPurchase: todayPurchase?.[0]?.total || 0,
-                monthlyPurchase: monthlyPurchase?.[0]?.total || 0
-
-            },
-
-            stock: {
-
-                totalStockQuantity: stockSummary?.[0]?.totalStock || 0
-
-            },
-
-            finance: {
-
-                totalIncome: income,
-                totalExpense: expense,
-                profit: income - expense
-
-            },
-
-            recentSales,
-            recentPurchases
-
-        };
-
-        return res.status(200).json({
-            success: true,
-            role,
-            data: dashboard
-        });
-
-    } catch (error) {
-
-        console.error("Dashboard Error:", error);
-
-        return res.status(500).json({
-            success: false,
-            message: error.message
-        });
-
-    }
-
+const UserModel = require("../model/user.model.js");
+const StoreModel = require("../model/store.model.js");
+const ProductModel = require("../model/product.model.js");
+const OrderModel = require("../model/order.model.js"); // adjust path if different
+
+const ORDER_STATUSES = [
+  "PENDING",
+  "CONFIRMED",
+  "SHIPPED",
+  "DELIVERED",
+  "CANCELLED",
+];
+
+// ---------- helpers ----------
+
+const getTodayRange = () => {
+  const start = new Date();
+  start.setHours(0, 0, 0, 0);
+  const end = new Date();
+  end.setHours(23, 59, 59, 999);
+  return { start, end };
 };
 
-module.exports = { getDashboard };
+const getYesterdayRange = () => {
+  const start = new Date();
+  start.setDate(start.getDate() - 1);
+  start.setHours(0, 0, 0, 0);
+  const end = new Date();
+  end.setDate(end.getDate() - 1);
+  end.setHours(23, 59, 59, 999);
+  return { start, end };
+};
+
+// [{_id:"PENDING", count:3}, ...] -> {PENDING:3, CONFIRMED:0, ...}
+const formatStatusBreakdown = (agg = []) => {
+  const map = ORDER_STATUSES.reduce((acc, s) => ({ ...acc, [s]: 0 }), {});
+  agg.forEach((item) => {
+    if (item._id in map) map[item._id] = item.count;
+  });
+  return map;
+};
+
+// ---------- ADMIN DASHBOARD ----------
+
+const adminDashboard = async (req, res) => {
+  try {
+    const userId = req.user?._id || req.user?.id;
+    if (!userId) {
+      return res.status(401).json({ success: false, message: "Unauthorized" });
+    }
+
+    const user = await UserModel.findById(userId);
+    if (!user) {
+      return res
+        .status(404)
+        .json({ success: false, message: "User not found" });
+    }
+    if (user.role !== "ADMIN") {
+      return res
+        .status(403)
+        .json({
+          success: false,
+          message: "Only ADMIN can view this dashboard",
+        });
+    }
+
+    const { start: todayStart, end: todayEnd } = getTodayRange();
+
+    const [
+      totalStores,
+      todayRegisteredStores,
+      verifiedStores,
+      unverifiedStores,
+      activeStores,
+      inactiveStores,
+      featuredStores,
+      totalUsers,
+      todayRegisteredUsers,
+      totalStoreOwners,
+      totalProducts,
+      verifiedProducts,
+      unverifiedProducts,
+      totalOrders,
+      todayOrders,
+      orderStatusAgg,
+      revenueAgg,
+      recentStores,
+    ] = await Promise.all([
+      StoreModel.countDocuments(),
+      StoreModel.countDocuments({
+        createdAt: { $gte: todayStart, $lte: todayEnd },
+      }),
+      StoreModel.countDocuments({ isVerify: true }),
+      StoreModel.countDocuments({ isVerify: false }),
+      StoreModel.countDocuments({ isActive: true }),
+      StoreModel.countDocuments({ isActive: false }),
+      StoreModel.countDocuments({ isFeatured: true }),
+      UserModel.countDocuments({ role: "USER" }),
+      UserModel.countDocuments({
+        role: "USER",
+        createdAt: { $gte: todayStart, $lte: todayEnd },
+      }),
+      UserModel.countDocuments({ role: "STORE" }),
+      ProductModel.countDocuments(),
+      ProductModel.countDocuments({ isVerified: true }),
+      ProductModel.countDocuments({ isVerified: false }),
+      OrderModel.countDocuments(),
+      OrderModel.countDocuments({
+        createdAt: { $gte: todayStart, $lte: todayEnd },
+      }),
+      OrderModel.aggregate([
+        { $group: { _id: "$status", count: { $sum: 1 } } },
+      ]),
+      OrderModel.aggregate([
+        { $match: { status: { $ne: "CANCELLED" } } },
+        { $group: { _id: null, total: { $sum: "$totalAmount" } } },
+      ]),
+      StoreModel.find()
+        .sort({ createdAt: -1 })
+        .limit(5)
+        .select("storeName storeUniqueId isVerify isActive createdAt"),
+    ]);
+
+    return res.status(200).json({
+      success: true,
+      stores: {
+        total: totalStores,
+        todayRegistered: todayRegisteredStores,
+        verified: verifiedStores,
+        unverified: unverifiedStores,
+        active: activeStores,
+        inactive: inactiveStores,
+        featured: featuredStores,
+      },
+      users: {
+        totalCustomers: totalUsers,
+        todayRegisteredCustomers: todayRegisteredUsers,
+        totalStoreOwners,
+      },
+      products: {
+        total: totalProducts,
+        verified: verifiedProducts,
+        pendingVerification: unverifiedProducts,
+      },
+      orders: {
+        total: totalOrders,
+        today: todayOrders,
+        statusBreakdown: formatStatusBreakdown(orderStatusAgg),
+        totalRevenue: revenueAgg[0]?.total || 0,
+      },
+      recentStores,
+    });
+  } catch (error) {
+    console.error("Admin dashboard error:", error);
+    return res
+      .status(500)
+      .json({ success: false, message: "Internal server error" });
+  }
+};
+
+// ---------- STORE DASHBOARD ----------
+
+const storeDashboard = async (req, res) => {
+  try {
+    const userId = req.user?._id || req.user?.id;
+    if (!userId) {
+      return res.status(401).json({ success: false, message: "Unauthorized" });
+    }
+
+    const user = await UserModel.findById(userId);
+    if (!user) {
+      return res
+        .status(404)
+        .json({ success: false, message: "User not found" });
+    }
+    if (user.role !== "STORE") {
+      return res
+        .status(403)
+        .json({
+          success: false,
+          message: "Only STORE can view this dashboard",
+        });
+    }
+
+    const store = await StoreModel.findOne({ userId });
+    if (!store) {
+      return res
+        .status(404)
+        .json({ success: false, message: "Store not found" });
+    }
+
+    const storeId = store._id;
+    const lowStockThreshold = parseInt(req.query.lowStockThreshold) || 5;
+
+    const { start: todayStart, end: todayEnd } = getTodayRange();
+    const { start: yesterdayStart, end: yesterdayEnd } = getYesterdayRange();
+
+    const [
+      totalOrders,
+      todayOrders,
+      yesterdayOrders,
+      orderStatusAgg,
+      revenueAgg,
+      todayRevenueAgg,
+      totalProducts,
+      activeProducts,
+      verifiedProducts,
+      lowStockProducts,
+      outOfStockAgg,
+      recentOrders,
+    ] = await Promise.all([
+      OrderModel.countDocuments({ storeId }),
+      OrderModel.countDocuments({
+        storeId,
+        createdAt: { $gte: todayStart, $lte: todayEnd },
+      }),
+      OrderModel.countDocuments({
+        storeId,
+        createdAt: { $gte: yesterdayStart, $lte: yesterdayEnd },
+      }),
+      OrderModel.aggregate([
+        { $match: { storeId } },
+        { $group: { _id: "$status", count: { $sum: 1 } } },
+      ]),
+      OrderModel.aggregate([
+        { $match: { storeId, status: { $ne: "CANCELLED" } } },
+        { $group: { _id: null, total: { $sum: "$totalAmount" } } },
+      ]),
+      OrderModel.aggregate([
+        {
+          $match: {
+            storeId,
+            status: { $ne: "CANCELLED" },
+            createdAt: { $gte: todayStart, $lte: todayEnd },
+          },
+        },
+        { $group: { _id: null, total: { $sum: "$totalAmount" } } },
+      ]),
+      ProductModel.countDocuments({ storeId }),
+      ProductModel.countDocuments({ storeId, isActive: true }),
+      ProductModel.countDocuments({ storeId, isVerified: true }),
+      ProductModel.aggregate([
+        { $match: { storeId, isActive: true } },
+        { $unwind: "$variants" },
+        {
+          $match: {
+            "variants.isActive": true,
+            "variants.stock": { $lte: lowStockThreshold },
+          },
+        },
+        {
+          $project: {
+            _id: 1,
+            name: 1,
+            productCode: 1,
+            variantId: "$variants._id",
+            size: "$variants.size",
+            weight: "$variants.weight",
+            stock: "$variants.stock",
+          },
+        },
+        { $sort: { stock: 1 } },
+        { $limit: 20 },
+      ]),
+      ProductModel.aggregate([
+        { $match: { storeId, isActive: true } },
+        { $unwind: "$variants" },
+        { $match: { "variants.isActive": true, "variants.stock": 0 } },
+        { $count: "count" },
+      ]),
+      OrderModel.find({ storeId })
+        .sort({ createdAt: -1 })
+        .limit(5)
+        .select("orderNumber status totalAmount totalItems createdAt"),
+    ]);
+
+    return res.status(200).json({
+      success: true,
+      store: {
+        _id: store._id,
+        storeName: store.storeName,
+        storeUniqueId: store.storeUniqueId,
+        isVerify: store.isVerify,
+        isActive: store.isActive,
+      },
+      orders: {
+        total: totalOrders,
+        today: todayOrders,
+        yesterday: yesterdayOrders,
+        statusBreakdown: formatStatusBreakdown(orderStatusAgg),
+        totalRevenue: revenueAgg[0]?.total || 0,
+        todayRevenue: todayRevenueAgg[0]?.total || 0,
+      },
+      products: {
+        total: totalProducts,
+        active: activeProducts,
+        verified: verifiedProducts,
+        outOfStockVariants: outOfStockAgg[0]?.count || 0,
+        lowStockThreshold,
+        lowStockProducts,
+      },
+      recentOrders,
+    });
+  } catch (error) {
+    console.error("Store dashboard error:", error);
+    return res
+      .status(500)
+      .json({ success: false, message: "Internal server error" });
+  }
+};
+
+module.exports = {
+  adminDashboard,
+  storeDashboard,
+};
