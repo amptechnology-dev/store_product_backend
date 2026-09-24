@@ -38,7 +38,9 @@ const cartRoutes = require("./src/routes/cart.routes.js");
 const orderRoutes = require("./src/routes/order.routes.js");
 const profileRoutes = require("./src/routes/profile.routes.js");
 const storeurlroutes = require("./src/routes/storeURL.routes.js");
-const dashboardroutes = require("./src/routes/dashboard.routes.js");
+const bannerRoutes = require("./src/routes/banner.route.js");
+const wishlistRoutes = require("./src/routes/wishlist.route.js");
+const productreviewRoutes = require("./src/routes/productReview.route.js");
 
 app.use("/api/register", registerRoutes);
 app.use("/api/login", loginRoutes);
@@ -52,6 +54,9 @@ app.use("/api/order", orderRoutes);
 app.use("/api/profile", profileRoutes);
 app.use("/store", storeurlroutes);
 app.use("/api/dashboard", dashboardRoutes);
+app.use("/api/banner", bannerRoutes);
+app.use("/api/wishlist", wishlistRoutes);
+app.use("/api/product", productreviewRoutes);
 
 const port = process.env.PORT || 8090;
 

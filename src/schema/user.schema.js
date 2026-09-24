@@ -1,6 +1,6 @@
 const { z } = require("zod");
 
-// registration er shomoy user er address required
+// address alada optional field, kintu jodi deoa hoy tahole er bhitorer required field gulo thik thakte hobe
 const addressSchema = z.object({
   addressLine: z.string().trim().min(1, "Address line is required"),
   area: z.string().trim().optional(),
@@ -27,8 +27,7 @@ const createUserSchema = z.object({
 
   isActive: z.boolean().optional(),
 
-  // ✅ NEW: registration er shomoy required
-  address: addressSchema,
+  address: addressSchema.optional(),
 });
 
 const updateUserSchema = z.object({
@@ -42,7 +41,6 @@ const updateUserSchema = z.object({
 
   isActive: z.boolean().optional(),
 
-  // update e address change korte chaile partial-o allow kora hocche
   address: addressSchema.partial().optional(),
 });
 

@@ -25,18 +25,9 @@ const variantSchema = new mongoose.Schema(
     sku: { type: String, trim: true },
     isActive: { type: Boolean, default: true },
   },
-  {
-    timestamps: false,
-    // ✅ FIX: pre("validate", function(next){...}) middleware-er bodole
-    // path-level custom validate use kora hocche. findByIdAndUpdate +
-    // runValidators diye array subdocument validate hobar somoy mongoose
-    // subdoc-er pre-validate hook-e thikmoto "next" pass korte pare na
-    // (mongoose-er known limitation), tai "next is not a function" ashe.
-    // Path-level validate sync, tai eta shob case-e (save + update) thikmoto kaj kore.
-  },
+  { timestamps: false },
 );
 
-// size ba weight - dutor moddhe ekta thakte hobe (sync validator, no "next" needed)
 variantSchema.path("size").validate(function (value) {
   return !!value || !!this.weight;
 }, "Each variant needs a size or weight");
@@ -44,6 +35,26 @@ variantSchema.path("size").validate(function (value) {
 variantSchema.path("weight").validate(function (value) {
   return !!value || !!this.size;
 }, "Each variant needs a size or weight");
+
+// ✅ NEW: Review schema (comment, rating, userId, image)
+const reviewSchema = new mongoose.Schema(
+  {
+    comment: { type: String, trim: true },
+    rating: {
+      type: Number,
+      required: [true, "Rating is required"],
+      min: [1, "Rating must be at least 1"],
+      max: [5, "Rating cannot be more than 5"],
+    },
+    userId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+      required: true,
+    },
+    image: { type: String, default: null },
+  },
+  { timestamps: true },
+);
 
 const productSchema = new mongoose.Schema(
   {
@@ -93,6 +104,11 @@ const productSchema = new mongoose.Schema(
       ref: "User",
       required: true,
     },
+
+    // ✅ NEW
+    reviews: [reviewSchema],
+    averageRating: { type: Number, default: 0, min: 0, max: 5 },
+    totalReviews: { type: Number, default: 0 },
   },
   { timestamps: true },
 );

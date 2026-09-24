@@ -762,9 +762,6 @@ const getStoreCategories = async (req, res) => {
   }
 };
 
-// ===================== 2. STORE PRODUCT LIST (search + filter) =====================
-// GET /store/:storeUniqueId/products
-//   ?search=&categoryId=&minPrice=&maxPrice=&sortBy=&page=&limit=
 const getStoreProducts = async (req, res) => {
   try {
     const { storeUniqueId } = req.params;
@@ -783,9 +780,81 @@ const getStoreProducts = async (req, res) => {
         .json({ success: false, message: "Store not found" });
     }
 
-    const result = await fetchStoreProducts(store, req.query, categoryId);
+    const match = {
+      storeId: store._id,
+      isActive: true,
+      isVerified: true,
+    };
 
-    return res.status(200).json({ success: true, store, ...result });
+    if (categoryId) {
+      match.categoryId = new mongoose.Types.ObjectId(categoryId);
+    }
+
+    const search = (req.query.search || "").trim();
+    if (search) {
+      const regex = new RegExp(escapeRegex(search), "i");
+      match.$or = [{ name: regex }, { productCode: regex }];
+    }
+
+    let products = await ProductModel.find(match)
+      .select(`${PRODUCT_LIST_FIELDS} reviews averageRating totalReviews`)
+      .populate("categoryId", "name")
+      .populate({ path: "reviews.userId", select: "name picture" })
+      .lean();
+
+    const minPrice = toPositiveNumber(req.query.minPrice);
+    const maxPrice = toPositiveNumber(req.query.maxPrice);
+    if (minPrice !== null || maxPrice !== null) {
+      products = products.filter((p) =>
+        (p.variants || []).some(
+          (v) =>
+            v.isActive !== false &&
+            (minPrice === null || v.offerPrice >= minPrice) &&
+            (maxPrice === null || v.offerPrice <= maxPrice),
+        ),
+      );
+    }
+
+    products = products.map((p) => {
+      const minOfferPrice = p.variants?.length
+        ? Math.min(...p.variants.map((v) => v.offerPrice))
+        : null;
+
+      const reviews = p.reviews || [];
+      const maxReview =
+        reviews.length > 0
+          ? [...reviews].sort((a, b) => b.rating - a.rating)[0]
+          : null;
+
+      return {
+        ...formatProduct(p),
+        minOfferPrice,
+        reviews,
+        maxReview,
+      };
+    });
+
+    const sortBy = req.query.sortBy;
+    if (sortBy === "price_asc") {
+      products.sort((a, b) => (a.minOfferPrice ?? 0) - (b.minOfferPrice ?? 0));
+    } else if (sortBy === "price_desc") {
+      products.sort((a, b) => (b.minOfferPrice ?? 0) - (a.minOfferPrice ?? 0));
+    } else if (sortBy === "name_asc") {
+      products.sort((a, b) => a.name.localeCompare(b.name));
+    } else if (sortBy === "name_desc") {
+      products.sort((a, b) => b.name.localeCompare(a.name));
+    } else if (sortBy === "oldest") {
+      products.sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
+    } else {
+      products.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+    }
+
+    return res.status(200).json({
+      success: true,
+      store,
+      count: products.length,
+      products,
+    });
   } catch (error) {
     console.error("Get Store Products Error:", error);
     return res
