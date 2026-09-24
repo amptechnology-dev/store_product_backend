@@ -41,6 +41,7 @@ const storeurlroutes = require("./src/routes/storeURL.routes.js");
 const bannerRoutes = require("./src/routes/banner.route.js");
 const wishlistRoutes = require("./src/routes/wishlist.route.js");
 const productreviewRoutes = require("./src/routes/productReview.route.js");
+const notificationRoutes = require("./src/routes/notification.route.js");
 
 app.use("/api/register", registerRoutes);
 app.use("/api/login", loginRoutes);
@@ -57,6 +58,7 @@ app.use("/api/dashboard", dashboardRoutes);
 app.use("/api/banner", bannerRoutes);
 app.use("/api/wishlist", wishlistRoutes);
 app.use("/api/product", productreviewRoutes);
+app.use("/api/notifications",notificationRoutes)
 
 const port = process.env.PORT || 8090;
 

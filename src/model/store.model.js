@@ -88,6 +88,7 @@ const storeSchema = new mongoose.Schema(
       type: Number,
       default: 0,
     },
+    fcmTokens: [{ type: String }],
   },
   { timestamps: true },
 );

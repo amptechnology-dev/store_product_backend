@@ -15,6 +15,7 @@ const {
   sendOrderConfirmationToUser,
   sendOrderStatusUpdateToUser,
 } = require("../helper/orderMail.js");
+const { notifyNewOrder } = require("../helper/notification.helper.js");
 
 // ===================== HELPERS =====================
 
@@ -347,7 +348,6 @@ const checkout = async (req, res) => {
       throw createError;
     }
 
-    // ---- Email notifications (non-blocking, fire-and-forget) ----
     for (const order of orders) {
       const store = storeMap.get(String(order.storeId));
       sendNewOrderEmailToStore({
@@ -355,6 +355,7 @@ const checkout = async (req, res) => {
         storeName: order.storeName,
         order,
       });
+      notifyNewOrder(order); 
     }
     sendOrderConfirmationToUser({
       toEmail: req.user?.email,
@@ -405,12 +406,10 @@ const buyNow = async (req, res) => {
 
     const variant = findActiveVariant(product, variantId);
     if (!variant) {
-      return res
-        .status(404)
-        .json({
-          success: false,
-          message: "Selected size/weight is not available",
-        });
+      return res.status(404).json({
+        success: false,
+        message: "Selected size/weight is not available",
+      });
     }
 
     const store = await StoreModel.findOne({
@@ -468,6 +467,7 @@ const buyNow = async (req, res) => {
       storeName: order.storeName,
       order,
     });
+    notifyNewOrder(order); 
     sendOrderConfirmationToUser({
       toEmail: req.user?.email,
       userName: req.user?.name,
