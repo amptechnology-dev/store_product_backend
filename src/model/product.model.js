@@ -3,8 +3,12 @@ const { getNextSequence } = require("../helper/counter.js");
 
 const variantSchema = new mongoose.Schema(
   {
-    size: { type: String, trim: true, uppercase: true },
-    weight: { type: String, trim: true, uppercase: true },
+    color: { type: String, trim: true }, // uppercase remove kora holo
+    size: { type: String, trim: true },
+    weight: { type: String, trim: true },
+    height: { type: String, trim: true },
+    images: [{ type: String }], // color/variant wise image
+
     mrp: {
       type: Number,
       required: [true, "MRP is required"],
@@ -28,15 +32,6 @@ const variantSchema = new mongoose.Schema(
   { timestamps: false },
 );
 
-variantSchema.path("size").validate(function (value) {
-  return !!value || !!this.weight;
-}, "Each variant needs a size or weight");
-
-variantSchema.path("weight").validate(function (value) {
-  return !!value || !!this.size;
-}, "Each variant needs a size or weight");
-
-// ✅ NEW: Review schema (comment, rating, userId, image)
 const reviewSchema = new mongoose.Schema(
   {
     comment: { type: String, trim: true },
@@ -61,32 +56,34 @@ const productSchema = new mongoose.Schema(
     name: {
       type: String,
       required: [true, "Product name is required"],
-      trim: true,
-      uppercase: true,
+      trim: true, // uppercase remove kora holo
     },
     productCode: { type: String, unique: true },
-    images: [{ type: String }],
     description: {
       type: String,
       required: [true, "Product description is required"],
-      trim: true,
-      uppercase: true,
+      trim: true, // uppercase remove kora holo
     },
     unit: {
       type: String,
       required: [true, "Unit is required"],
-      trim: true,
-      uppercase: true,
-    },
-    variants: {
-      type: [variantSchema],
-      required: true,
-      validate: {
-        validator: (v) => Array.isArray(v) && v.length > 0,
-        message: "At least one variant is required",
-      },
+      trim: true, // uppercase remove kora holo
     },
     deliveryTime: { type: String, trim: true },
+
+    // ---------- Main product image (always thake, variant mode hok ba na hok) ----------
+    images: [{ type: String }],
+    mrp: { type: Number, min: [0, "MRP must be >= 0"] },
+    offerPrice: { type: Number, min: [0, "Offer price must be >= 0"] },
+    stock: { type: Number, default: 0, min: [0, "Stock must be >= 0"] },
+
+    // ---------- Variant mode (hasVariants ba hasColor kono ekta true) ----------
+    variants: { type: [variantSchema], default: [] },
+
+    hasVariants: { type: Boolean, default: false },
+    hasColor: { type: Boolean, default: false },
+    hasStockManagement: { type: Boolean, default: false },
+
     isActive: { type: Boolean, default: true },
     isVerified: { type: Boolean, default: false },
     storeId: {
@@ -105,7 +102,6 @@ const productSchema = new mongoose.Schema(
       required: true,
     },
 
-    // ✅ NEW
     reviews: [reviewSchema],
     averageRating: { type: Number, default: 0, min: 0, max: 5 },
     totalReviews: { type: Number, default: 0 },

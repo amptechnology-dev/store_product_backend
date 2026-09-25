@@ -9,11 +9,18 @@ const {
 } = require("../schema/product.schema.js");
 const { uploadToR2 } = require("../helper/upload.js");
 const sendProductVerifyEmail = require("../helper/sendProductVerifyEmail.js");
+const { getStoreSettings } = require("../helper/storeSettings.js");
+const {
+  validateProductBySettings,
+} = require("../helper/validateProductBySettings.js");
+const {
+  uploadSimpleImages,
+  uploadVariantImages,
+} = require("../helper/productImages.js");
 
 const createProduct = async (req, res) => {
   try {
     const body = { ...req.body };
-    // multipart/form-data দিয়ে আসলে variants একটা JSON string হয়ে আসবে
     if (typeof body.variants === "string") {
       try {
         body.variants = JSON.parse(body.variants);
@@ -37,13 +44,11 @@ const createProduct = async (req, res) => {
         .json({ success: false, message: "User not found" });
     }
     if (user.role !== "STORE") {
-      return res.status(403).json({
-        success: false,
-        message: "Only STORE can create product",
-      });
+      return res
+        .status(403)
+        .json({ success: false, message: "Only STORE can create product" });
     }
 
-    // storeId valid & active kina check
     const store = await StoreModel.findById(parsedData.storeId);
     if (!store) {
       return res
@@ -51,34 +56,53 @@ const createProduct = async (req, res) => {
         .json({ success: false, message: "Store not found" });
     }
 
-    // categoryId ei store er under e ase kina check
     const category = await CategoryModel.findOne({
       _id: parsedData.categoryId,
       storeId: parsedData.storeId,
     });
     if (!category) {
-      return res.status(404).json({
-        success: false,
-        message: "Category not found for this store",
-      });
+      return res
+        .status(404)
+        .json({ success: false, message: "Category not found for this store" });
     }
 
-    let images = [];
-    if (req.files?.length) {
-      for (const file of req.files) {
-        if (file.fieldname.startsWith("image")) {
-          const fileName = `amp-store/${Date.now()}-${file.originalname}`;
-          const url = await uploadToR2(file.buffer, fileName, file.mimetype);
-          images.push(url);
-        }
-      }
+    // ---------- store settings onujayi dynamic validation ----------
+    const settings = await getStoreSettings(parsedData.storeId);
+    const { errors, data, usesVariants } = validateProductBySettings(
+      settings,
+      body,
+    );
+    if (errors.length) {
+      return res
+        .status(400)
+        .json({ success: false, message: "Validation failed", errors });
+    }
+
+    // ---------- MAIN PRODUCT IMAGE (mode nirbishese sob somoy upload hobe) ----------
+    data.images = await uploadSimpleImages(req.files);
+
+    // ---------- VARIANT (COLOR) IMAGE (shudhu hasColor thakle) ----------
+    if (settings.hasColor) {
+      const variantImageMap = await uploadVariantImages(req.files);
+      data.variants = (data.variants || []).map((v, idx) => ({
+        ...v,
+        images: [...(v.images || []), ...(variantImageMap[idx] || [])],
+      }));
     }
 
     const product = await ProductModel.create({
-      ...parsedData, // variants array shoho
-      images,
+      name: parsedData.name,
+      description: parsedData.description,
+      unit: parsedData.unit,
+      deliveryTime: parsedData.deliveryTime,
+      storeId: parsedData.storeId,
+      categoryId: parsedData.categoryId,
       userId,
       isVerified: true,
+      hasVariants: settings.hasVariants,
+      hasColor: settings.hasColor,
+      hasStockManagement: settings.hasStockManagement,
+      ...data,
     });
 
     return res.status(201).json({
@@ -88,7 +112,6 @@ const createProduct = async (req, res) => {
     });
   } catch (error) {
     console.log(error);
-
     if (error.name === "ZodError") {
       return res.status(400).json({
         success: false,
@@ -99,26 +122,21 @@ const createProduct = async (req, res) => {
         })),
       });
     }
-
     if (error.name === "ValidationError") {
       const errors = Object.values(error.errors).map((e) => ({
         field: e.path,
         message: e.message,
       }));
-      return res.status(400).json({
-        success: false,
-        message: "Validation failed",
-        errors,
-      });
+      return res
+        .status(400)
+        .json({ success: false, message: "Validation failed", errors });
     }
-
     if (error.code === 11000) {
       return res.status(400).json({
         success: false,
         message: "Product with this name already exists",
       });
     }
-
     return res
       .status(500)
       .json({ success: false, message: "Internal server error" });
@@ -175,19 +193,33 @@ const getAllProducts = async (req, res) => {
           description: 1,
           unit: 1,
           variants: 1,
-          minOfferPrice: { $min: "$variants.offerPrice" },
-          maxOfferPrice: { $max: "$variants.offerPrice" },
+          mrp: 1,
+          offerPrice: 1,
+          stock: 1,
+          hasVariants: 1,
+          hasColor: 1,
+          hasStockManagement: 1,
+          minOfferPrice: {
+            $cond: [
+              { $gt: [{ $size: { $ifNull: ["$variants", []] } }, 0] },
+              { $min: "$variants.offerPrice" },
+              "$offerPrice",
+            ],
+          },
+          maxOfferPrice: {
+            $cond: [
+              { $gt: [{ $size: { $ifNull: ["$variants", []] } }, 0] },
+              { $max: "$variants.offerPrice" },
+              "$offerPrice",
+            ],
+          },
           deliveryTime: 1,
-
           isActive: 1,
           isVerified: 1,
-
           storeId: 1,
           categoryId: 1,
           userId: 1,
-
           createdAt: 1,
-
           store: {
             _id: "$store._id",
             storeName: "$store.storeName",
@@ -241,7 +273,6 @@ const updateProduct = async (req, res) => {
   try {
     const { id } = req.params;
     const userId = req.user?._id || req.user?.id;
-
     if (!userId) {
       return res.status(401).json({ success: false, message: "Unauthorized" });
     }
@@ -253,10 +284,9 @@ const updateProduct = async (req, res) => {
         .json({ success: false, message: "User not found" });
     }
     if (user.role !== "STORE") {
-      return res.status(403).json({
-        success: false,
-        message: "Only STORE can update product",
-      });
+      return res
+        .status(403)
+        .json({ success: false, message: "Only STORE can update product" });
     }
 
     const existingProduct = await ProductModel.findOne({ _id: id, userId });
@@ -279,7 +309,6 @@ const updateProduct = async (req, res) => {
 
     const parsedData = updateProductSchema.parse(body);
 
-    // name duplicate check
     if (parsedData.name) {
       const duplicate = await ProductModel.findOne({
         name: { $regex: `^${parsedData.name}$`, $options: "i" },
@@ -295,7 +324,6 @@ const updateProduct = async (req, res) => {
       }
     }
 
-    // category change hole check
     if (parsedData.categoryId) {
       const category = await CategoryModel.findOne({
         _id: parsedData.categoryId,
@@ -309,31 +337,65 @@ const updateProduct = async (req, res) => {
       }
     }
 
-    // image handling
-    let images = [];
-    if (req.body.images) {
-      images = Array.isArray(req.body.images)
-        ? req.body.images
-        : [req.body.images];
-    }
-    if (req.files?.length) {
-      for (const file of req.files) {
-        if (file.fieldname.startsWith("image")) {
-          const fileName = `amp-store/${Date.now()}-${file.originalname}`;
-          const url = await uploadToR2(file.buffer, fileName, file.mimetype);
-          images.push(url);
-        }
+    const settings = {
+      hasVariants: existingProduct.hasVariants,
+      hasColor: existingProduct.hasColor,
+      hasStockManagement: existingProduct.hasStockManagement,
+    };
+
+    // ---------- MAIN PRODUCT IMAGE (mode nirbishese sob somoy update hobe) ----------
+    // "images" field e frontend theke remaining existing URL gulo (string) ashe
+    // r notun file gulo "image0","image1"... fieldname diye
+    const existingMainImages = body.images
+      ? Array.isArray(body.images)
+        ? body.images
+        : [body.images]
+      : [];
+    const newMainImages = await uploadSimpleImages(req.files);
+    const finalMainImages = [...existingMainImages, ...newMainImages];
+
+    let updateData = { ...parsedData, images: finalMainImages };
+
+    const isPricingUpdate =
+      body.variants !== undefined ||
+      body.mrp !== undefined ||
+      body.offerPrice !== undefined ||
+      body.stock !== undefined;
+
+    if (isPricingUpdate) {
+      const { errors, data, usesVariants } = validateProductBySettings(
+        settings,
+        body,
+      );
+      if (errors.length) {
+        return res
+          .status(400)
+          .json({ success: false, message: "Validation failed", errors });
+      }
+
+      if (existingProduct.hasColor) {
+        const variantImageMap = await uploadVariantImages(req.files);
+        data.variants = (data.variants || []).map((v, idx) => ({
+          ...v,
+          images: [...(v.images || []), ...(variantImageMap[idx] || [])],
+        }));
+      }
+
+      updateData = { ...updateData, ...data, images: finalMainImages };
+    } else if (existingProduct.hasColor && req.files?.length) {
+      const variantImageMap = await uploadVariantImages(req.files);
+      if (Object.keys(variantImageMap).length) {
+        updateData.variants = (existingProduct.variants || []).map(
+          (v, idx) => {
+            const obj = v.toObject ? v.toObject() : v;
+            return {
+              ...obj,
+              images: [...(obj.images || []), ...(variantImageMap[idx] || [])],
+            };
+          },
+        );
       }
     }
-    if (!req.body.images && !req.files?.length) {
-      images = existingProduct.images;
-    }
-
-    // note: variants pathale purota replace hobe (partial-merge kora hoyni)
-    const updateData = {
-      ...parsedData,
-      images,
-    };
 
     const updatedProduct = await ProductModel.findByIdAndUpdate(
       id,
@@ -348,7 +410,6 @@ const updateProduct = async (req, res) => {
     });
   } catch (error) {
     console.log(error);
-
     if (error.name === "ZodError") {
       return res.status(400).json({
         success: false,
@@ -359,19 +420,15 @@ const updateProduct = async (req, res) => {
         })),
       });
     }
-
     if (error.name === "ValidationError") {
       const errors = Object.values(error.errors).map((e) => ({
         field: e.path,
         message: e.message,
       }));
-      return res.status(400).json({
-        success: false,
-        message: "Validation failed",
-        errors,
-      });
+      return res
+        .status(400)
+        .json({ success: false, message: "Validation failed", errors });
     }
-
     return res
       .status(500)
       .json({ success: false, message: "Internal server error" });
@@ -534,8 +591,6 @@ const allProductWithStore = async (req, res) => {
 
 // ...............Public controller for product................
 
-// ===================== STOREFRONT (PUBLIC) HELPERS =====================
-
 const escapeRegex = (str = "") => str.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
 const PUBLIC_STORE_FIELDS =
@@ -549,7 +604,6 @@ const SORT_MAP = {
   oldest: { createdAt: 1 },
   name_asc: { name: 1 },
   name_desc: { name: -1 },
-  // price_asc / price_desc ekhon fetchStoreProducts-e alada kore handle hocche
 };
 
 const getPagination = (query) => {
@@ -564,13 +618,11 @@ const toPositiveNumber = (value) => {
   return Number.isFinite(num) && num >= 0 ? num : null;
 };
 
-// storeUniqueId diye active store ber kora
 const getPublicStore = (storeUniqueId) =>
   StoreModel.findOne({ storeUniqueId, isActive: true })
     .select(PUBLIC_STORE_FIELDS)
     .lean();
 
-// products.map -> populated categoryId ke `category` hishebe format kora
 const formatProduct = ({ categoryId, ...product }) => ({
   ...product,
   categoryId: categoryId?._id ?? null,
@@ -579,8 +631,6 @@ const formatProduct = ({ categoryId, ...product }) => ({
     : null,
 });
 
-// list + search + category + price filter + sort + pagination (shared logic)
-// variants array-er kaarone ekhon aggregation diye kora hocche
 const fetchStoreProducts = async (store, query, categoryId) => {
   const { page, limit, skip } = getPagination(query);
 
@@ -609,16 +659,31 @@ const fetchStoreProducts = async (store, query, categoryId) => {
     const priceRange = {};
     if (minPrice !== null) priceRange.$gte = minPrice;
     if (maxPrice !== null) priceRange.$lte = maxPrice;
-    // at least one active variant er offerPrice range-er moddhe thakte hobe
+
     pipeline.push({
       $match: {
-        variants: { $elemMatch: { offerPrice: priceRange, isActive: true } },
+        $or: [
+          {
+            variants: {
+              $elemMatch: { offerPrice: priceRange, isActive: true },
+            },
+          },
+          { $and: [{ variants: { $size: 0 } }, { offerPrice: priceRange }] },
+        ],
       },
     });
   }
 
   pipeline.push({
-    $addFields: { minOfferPrice: { $min: "$variants.offerPrice" } },
+    $addFields: {
+      minOfferPrice: {
+        $cond: [
+          { $gt: [{ $size: { $ifNull: ["$variants", []] } }, 0] },
+          { $min: "$variants.offerPrice" },
+          "$offerPrice",
+        ],
+      },
+    },
   });
 
   let sort;
@@ -652,6 +717,12 @@ const fetchStoreProducts = async (store, query, categoryId) => {
               description: 1,
               unit: 1,
               variants: 1,
+              mrp: 1,
+              offerPrice: 1,
+              stock: 1,
+              hasVariants: 1,
+              hasColor: 1,
+              hasStockManagement: 1,
               minOfferPrice: 1,
               deliveryTime: 1,
               storeId: 1,
@@ -681,8 +752,6 @@ const fetchStoreProducts = async (store, query, categoryId) => {
   };
 };
 
-// ===================== 1. STORE CATEGORY LIST =====================
-// GET /store/:storeUniqueId/categories?search=&includeEmpty=true
 const getStoreCategories = async (req, res) => {
   try {
     const { storeUniqueId } = req.params;
@@ -739,7 +808,6 @@ const getStoreCategories = async (req, res) => {
       },
     ];
 
-    // default e empty category hide kora hoy
     if (req.query.includeEmpty !== "true") {
       pipeline.push({ $match: { productCount: { $gt: 0 } } });
     }
@@ -797,7 +865,9 @@ const getStoreProducts = async (req, res) => {
     }
 
     let products = await ProductModel.find(match)
-      .select(`${PRODUCT_LIST_FIELDS} reviews averageRating totalReviews`)
+      .select(
+        `${PRODUCT_LIST_FIELDS} mrp offerPrice stock hasVariants hasColor hasStockManagement reviews averageRating totalReviews`,
+      )
       .populate("categoryId", "name")
       .populate({ path: "reviews.userId", select: "name picture" })
       .lean();
@@ -805,20 +875,27 @@ const getStoreProducts = async (req, res) => {
     const minPrice = toPositiveNumber(req.query.minPrice);
     const maxPrice = toPositiveNumber(req.query.maxPrice);
     if (minPrice !== null || maxPrice !== null) {
-      products = products.filter((p) =>
-        (p.variants || []).some(
-          (v) =>
-            v.isActive !== false &&
-            (minPrice === null || v.offerPrice >= minPrice) &&
-            (maxPrice === null || v.offerPrice <= maxPrice),
-        ),
-      );
+      products = products.filter((p) => {
+        if (p.variants?.length) {
+          return p.variants.some(
+            (v) =>
+              v.isActive !== false &&
+              (minPrice === null || v.offerPrice >= minPrice) &&
+              (maxPrice === null || v.offerPrice <= maxPrice),
+          );
+        }
+        if (p.offerPrice === undefined || p.offerPrice === null) return false;
+        return (
+          (minPrice === null || p.offerPrice >= minPrice) &&
+          (maxPrice === null || p.offerPrice <= maxPrice)
+        );
+      });
     }
 
     products = products.map((p) => {
       const minOfferPrice = p.variants?.length
         ? Math.min(...p.variants.map((v) => v.offerPrice))
-        : null;
+        : (p.offerPrice ?? null);
 
       const reviews = p.reviews || [];
       const maxReview =
@@ -863,9 +940,6 @@ const getStoreProducts = async (req, res) => {
   }
 };
 
-// ===================== 3. CATEGORY WISE PRODUCTS =====================
-// GET /store/:storeUniqueId/categories/:categoryId/products
-//   ?search=&minPrice=&maxPrice=&sortBy=&page=&limit=
 const getStoreProductsByCategory = async (req, res) => {
   try {
     const { storeUniqueId, categoryId } = req.params;
@@ -883,7 +957,6 @@ const getStoreProductsByCategory = async (req, res) => {
         .json({ success: false, message: "Store not found" });
     }
 
-    // category ei store er kina check
     const category = await CategoryModel.findOne({
       _id: categoryId,
       storeId: store._id,
@@ -910,8 +983,6 @@ const getStoreProductsByCategory = async (req, res) => {
   }
 };
 
-// ===================== 4. STORE SINGLE PRODUCT =====================
-// GET /store/:storeUniqueId/products/:productId
 const getStoreSingleProduct = async (req, res) => {
   try {
     const { storeUniqueId, productId } = req.params;
@@ -931,7 +1002,7 @@ const getStoreSingleProduct = async (req, res) => {
 
     const product = await ProductModel.findOne({
       _id: productId,
-      storeId: store._id, // onno store er product access kora jabe na
+      storeId: store._id,
       isActive: true,
       isVerified: true,
     })
@@ -945,7 +1016,6 @@ const getStoreSingleProduct = async (req, res) => {
         .json({ success: false, message: "Product not found" });
     }
 
-    // same category er related products
     const categoryId = product.categoryId?._id;
     const relatedProducts = categoryId
       ? await ProductModel.find({

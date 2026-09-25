@@ -7,7 +7,11 @@ const cartItemSchema = new mongoose.Schema(
       ref: "Product",
       required: true,
     },
-    variantId: { type: mongoose.Schema.Types.ObjectId, required: true },
+    // simple (non-variant) product hole variantId null thakbe
+    variantId: {
+      type: mongoose.Schema.Types.ObjectId,
+      default: null,
+    },
     storeId: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "Store",
@@ -24,8 +28,10 @@ const cartItemSchema = new mongoose.Schema(
       },
     },
 
+    color: { type: String, default: null, trim: true },
     size: { type: String, default: null, trim: true },
     weight: { type: String, default: null, trim: true },
+    height: { type: String, default: null, trim: true },
 
     name: { type: String, required: true },
     productCode: { type: String },

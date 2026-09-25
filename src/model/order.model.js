@@ -15,13 +15,18 @@ const orderItemSchema = new mongoose.Schema({
     ref: "Product",
     required: true,
   },
-  variantId: { type: mongoose.Schema.Types.ObjectId, required: true },
+  variantId: {
+    type: mongoose.Schema.Types.ObjectId,
+    default: null,
+  },
   name: { type: String, required: true },
   productCode: { type: String },
   image: { type: String, default: null },
   unit: { type: String },
+  color: { type: String, default: null },
   size: { type: String, default: null },
   weight: { type: String, default: null },
+  height: { type: String, default: null },
   mrp: { type: Number, required: true, min: 0 },
   offerPrice: { type: Number, required: true, min: 0 },
   quantity: { type: Number, required: true, min: 1 },
@@ -56,13 +61,11 @@ const orderSchema = new mongoose.Schema(
   {
     orderNumber: { type: String, unique: true },
 
-    // je cart theke order holo
     cartId: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "Cart",
       default: null,
     },
-    // ek checkout e toiri hoya shob order (store wise) er common id
     checkoutId: { type: mongoose.Schema.Types.ObjectId, default: null },
 
     userId: {
@@ -76,7 +79,6 @@ const orderSchema = new mongoose.Schema(
       required: true,
     },
 
-    // store snapshot (store delete hole o order history thakbe)
     storeName: { type: String },
     storeUniqueId: { type: String },
 
@@ -117,7 +119,7 @@ orderSchema.index({ checkoutId: 1 });
 orderSchema.pre("save", async function () {
   if (this.isNew && !this.orderNumber) {
     const seq = await getNextSequence("orderNumber");
-    this.orderNumber = `ORD${String(seq).padStart(6, "0")}`; // ORD000001
+    this.orderNumber = `ORD${String(seq).padStart(6, "0")}`;
   }
 });
 

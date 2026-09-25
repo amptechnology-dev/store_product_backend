@@ -42,15 +42,56 @@ const findActiveVariant = (product, variantId) =>
     (v) => String(v._id) === String(variantId) && v.isActive !== false,
   );
 
-const toSnapshot = (product, variant) => ({
+// variantId thakle -> oi variant er data
+// variantId na thakle -> product ta simple (no variant) hole product-level data
+// product-e variant thakle kintu variantId na dile -> null (invalid, variant select kora lagbe)
+const resolveLineSource = (product, variantId) => {
+  const hasVariants = Array.isArray(product?.variants) && product.variants.length > 0;
+
+  if (variantId) {
+    const variant = findActiveVariant(product, variantId);
+    if (!variant) return null;
+    return {
+      variantId: variant._id,
+      mrp: variant.mrp,
+      offerPrice: variant.offerPrice,
+      stock: variant.stock,
+      color: variant.color ?? null,
+      size: variant.size ?? null,
+      weight: variant.weight ?? null,
+      height: variant.height ?? null,
+      image: variant.images?.[0] ?? product.images?.[0] ?? null,
+    };
+  }
+
+  if (hasVariants) return null; // variant product -> variantId mandatory
+
+  if (product?.mrp === undefined || product?.mrp === null) return null;
+
+  return {
+    variantId: null,
+    mrp: product.mrp,
+    offerPrice: product.offerPrice,
+    stock: product.stock,
+    color: null,
+    size: null,
+    weight: null,
+    height: null,
+    image: product.images?.[0] ?? null,
+  };
+};
+
+const toSnapshot = (product, source) => ({
   name: product.name,
   productCode: product.productCode,
-  image: product.images?.[0] ?? null,
+  image: source.image,
   unit: product.unit,
-  size: variant.size ?? null,
-  weight: variant.weight ?? null,
-  mrp: variant.mrp,
-  offerPrice: variant.offerPrice,
+  color: source.color,
+  size: source.size,
+  weight: source.weight,
+  height: source.height,
+  mrp: source.mrp,
+  offerPrice: source.offerPrice,
 });
 
 const newSummary = () => ({
@@ -83,7 +124,7 @@ const serializeCart = async (cart) => {
 
   const [products, stores] = await Promise.all([
     ProductModel.find({ _id: { $in: productIds } })
-      .select("name productCode images unit variants isActive isVerified")
+      .select("name productCode images unit variants mrp offerPrice stock isActive isVerified")
       .lean(),
     StoreModel.find({ _id: { $in: storeIds } })
       .select("storeName storeUniqueId images isActive")
@@ -116,13 +157,13 @@ const serializeCart = async (cart) => {
     const group = groups.get(storeKey);
 
     const liveProduct = productMap.get(String(item.productId));
-    const liveVariant = liveProduct ? findActiveVariant(liveProduct, item.variantId) : null;
+    const liveSource = liveProduct ? resolveLineSource(liveProduct, item.variantId) : null;
     const isAvailable = Boolean(
-      liveProduct?.isActive && liveProduct?.isVerified && liveVariant && store?.isActive,
+      liveProduct?.isActive && liveProduct?.isVerified && liveSource && store?.isActive,
     );
 
-    const mrp = isAvailable ? liveVariant.mrp : item.mrp;
-    const offerPrice = isAvailable ? liveVariant.offerPrice : item.offerPrice;
+    const mrp = isAvailable ? liveSource.mrp : item.mrp;
+    const offerPrice = isAvailable ? liveSource.offerPrice : item.offerPrice;
     const lineTotal = round2(offerPrice * item.quantity);
 
     for (const s of [group.summary, overall]) {
@@ -141,17 +182,19 @@ const serializeCart = async (cart) => {
       variantId: item.variantId,
       name: isAvailable ? liveProduct.name : item.name,
       productCode: isAvailable ? liveProduct.productCode : item.productCode,
-      image: isAvailable ? (liveProduct.images?.[0] ?? null) : (item.image ?? null),
+      image: isAvailable ? liveSource.image : (item.image ?? null),
       unit: isAvailable ? liveProduct.unit : item.unit,
-      size: isAvailable ? liveVariant.size : item.size,
-      weight: isAvailable ? liveVariant.weight : item.weight,
+      color: isAvailable ? liveSource.color : item.color,
+      size: isAvailable ? liveSource.size : item.size,
+      weight: isAvailable ? liveSource.weight : item.weight,
+      height: isAvailable ? liveSource.height : item.height,
       quantity: item.quantity,
       mrp,
       offerPrice,
       lineTotal,
       isAvailable,
-      priceChanged: isAvailable && liveVariant.offerPrice !== item.offerPrice,
-      stock: isAvailable ? liveVariant.stock : undefined,
+      priceChanged: isAvailable && liveSource.offerPrice !== item.offerPrice,
+      stock: isAvailable ? liveSource.stock : undefined,
     });
   }
 
@@ -168,8 +211,6 @@ const serializeCart = async (cart) => {
 };
 
 // ===================== 1. ADD TO CART =====================
-// POST /cart/add
-// body: { productId, variantId, quantity? }
 const addToCart = async (req, res) => {
   try {
     const userId = getUserId(req);
@@ -184,11 +225,15 @@ const addToCart = async (req, res) => {
       return res.status(404).json({ success: false, message: "Product not available" });
     }
 
-    const variant = findActiveVariant(product, variantId);
-    if (!variant) {
-      return res
-        .status(404)
-        .json({ success: false, message: "Selected size/weight is not available" });
+    const source = resolveLineSource(product, variantId);
+    if (!source) {
+      const hasVariants = Array.isArray(product.variants) && product.variants.length > 0;
+      return res.status(400).json({
+        success: false,
+        message: hasVariants
+          ? "Please select a valid size/weight/color option"
+          : "This product is not available right now",
+      });
     }
 
     const store = await StoreModel.findOne({ _id: product.storeId, isActive: true })
@@ -204,12 +249,11 @@ const addToCart = async (req, res) => {
       { upsert: true, new: true },
     );
 
-    // ✅ same product + SAME variant hole ek line, kintu same product +
-    // ALADA variant (jemon Large ar Small) hole alada alada cart line hobe
+    // same product + SAME variant (ba duitai simple hole) -> ek line
     const existing = cart.items.find(
       (i) =>
         String(i.productId) === String(product._id) &&
-        String(i.variantId) === String(variant._id),
+        String(i.variantId ?? "") === String(source.variantId ?? ""),
     );
 
     const newQuantity = (existing?.quantity ?? 0) + quantity;
@@ -227,14 +271,14 @@ const addToCart = async (req, res) => {
       });
     }
 
-    const snapshot = toSnapshot(product, variant);
+    const snapshot = toSnapshot(product, source);
 
     if (existing) {
       existing.set({ ...snapshot, storeName: store.storeName, quantity: newQuantity });
     } else {
       cart.items.push({
         productId: product._id,
-        variantId: variant._id,
+        variantId: source.variantId,
         storeId: product.storeId,
         storeName: store.storeName,
         quantity,
@@ -288,16 +332,16 @@ const updateCartItem = async (req, res) => {
       isVerified: true,
     }).lean();
 
-    const variant = product ? findActiveVariant(product, item.variantId) : null;
+    const source = product ? resolveLineSource(product, item.variantId) : null;
 
-    if (!product || !variant) {
+    if (!source) {
       return res.status(400).json({
         success: false,
         message: "This product is no longer available. Please remove it from your cart.",
       });
     }
 
-    item.set({ ...toSnapshot(product, variant), quantity });
+    item.set({ ...toSnapshot(product, source), quantity });
     await cart.save();
 
     return res.status(200).json({

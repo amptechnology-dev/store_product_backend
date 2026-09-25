@@ -32,10 +32,10 @@ const cartCheckoutSchema = z.object({
   paymentMethod: z.enum(["COD"]).default("COD"),
 });
 
-// ---- Product theke direct "Buy Now" (cart chara, ekta product + ekta variant) ----
+// ---- Product theke direct "Buy Now" (cart chara, ekta product + optional variant) ----
 const directCheckoutSchema = z.object({
   productId: objectIdSchema,
-  variantId: objectIdSchema,
+  variantId: objectIdSchema.optional(),
   quantity: z.coerce
     .number()
     .int("Quantity must be a whole number")

@@ -9,7 +9,7 @@ const MAX_CART_LINES = 50;
 
 const addToCartSchema = z.object({
   productId: objectIdSchema,
-  variantId: objectIdSchema,
+  variantId: objectIdSchema.optional(),
   quantity: z.coerce
     .number()
     .int("Quantity must be a whole number")

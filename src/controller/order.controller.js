@@ -94,6 +94,43 @@ const findActiveVariant = (product, variantId) =>
     (v) => String(v._id) === String(variantId) && v.isActive !== false,
   );
 
+// variantId thakle -> oi variant er data (color/size/weight/height/image soho)
+// variantId na thakle -> product simple (no variant) hole product-level data
+// product-e variant thakle kintu variantId na dile -> null
+const resolveLineSource = (product, variantId) => {
+  const hasVariants = Array.isArray(product?.variants) && product.variants.length > 0;
+
+  if (variantId) {
+    const variant = findActiveVariant(product, variantId);
+    if (!variant) return null;
+    return {
+      variantId: variant._id,
+      mrp: variant.mrp,
+      offerPrice: variant.offerPrice,
+      color: variant.color ?? null,
+      size: variant.size ?? null,
+      weight: variant.weight ?? null,
+      height: variant.height ?? null,
+      image: variant.images?.[0] ?? product.images?.[0] ?? null,
+    };
+  }
+
+  if (hasVariants) return null;
+
+  if (product?.mrp === undefined || product?.mrp === null) return null;
+
+  return {
+    variantId: null,
+    mrp: product.mrp,
+    offerPrice: product.offerPrice,
+    color: null,
+    size: null,
+    weight: null,
+    height: null,
+    image: product.images?.[0] ?? null,
+  };
+};
+
 const getOrdersGroupedByStore = async (
   userId,
   { status, ordersPerStore = 5 } = {},
@@ -195,22 +232,22 @@ const checkout = async (req, res) => {
 
     const [stores, products] = await Promise.all([
       StoreModel.find({ _id: { $in: selectedStoreIds }, isActive: true })
-        .select("storeName storeUniqueId email") // 👈 email add holo
+        .select("storeName storeUniqueId email")
         .lean(),
       ProductModel.find({
         _id: { $in: selectedItems.map((i) => i.productId) },
         isActive: true,
         isVerified: true,
       })
-        .select("storeId name productCode images unit variants")
+        .select("storeId name productCode images unit variants mrp offerPrice")
         .lean(),
     ]);
 
     const storeMap = new Map(stores.map((s) => [String(s._id), s]));
     const productMap = new Map(products.map((p) => [String(p._id), p]));
 
-    // item-er live product + live (active) variant ber kora
-    const getLiveVariant = (item) => {
+    // item-er live product + live source (variant ba simple) ber kora
+    const getLiveSource = (item) => {
       const p = productMap.get(String(item.productId));
       if (
         !p ||
@@ -219,15 +256,15 @@ const checkout = async (req, res) => {
       ) {
         return null;
       }
-      const variant = findActiveVariant(p, item.variantId);
-      return variant ? { product: p, variant } : null;
+      const source = resolveLineSource(p, item.variantId);
+      return source ? { product: p, source } : null;
     };
 
     const unavailableItems = [];
     const groups = new Map();
 
     for (const item of selectedItems) {
-      const live = getLiveVariant(item);
+      const live = getLiveSource(item);
       if (!live) {
         unavailableItems.push({
           itemId: item._id,
@@ -238,9 +275,9 @@ const checkout = async (req, res) => {
         continue;
       }
 
-      const { product: p, variant } = live;
+      const { product: p, source } = live;
       const key = String(item.storeId);
-      const lineTotal = round2(variant.offerPrice * item.quantity);
+      const lineTotal = round2(source.offerPrice * item.quantity);
 
       if (!groups.has(key)) {
         groups.set(key, {
@@ -255,20 +292,22 @@ const checkout = async (req, res) => {
 
       group.items.push({
         productId: p._id,
-        variantId: variant._id,
+        variantId: source.variantId,
         name: p.name,
         productCode: p.productCode,
-        image: p.images?.[0] ?? null,
+        image: source.image,
         unit: p.unit,
-        size: variant.size ?? null,
-        weight: variant.weight ?? null,
-        mrp: variant.mrp,
-        offerPrice: variant.offerPrice,
+        color: source.color,
+        size: source.size,
+        weight: source.weight,
+        height: source.height,
+        mrp: source.mrp,
+        offerPrice: source.offerPrice,
         quantity: item.quantity,
         lineTotal,
       });
       group.totalItems += item.quantity;
-      group.totalMrp += variant.mrp * item.quantity;
+      group.totalMrp += source.mrp * item.quantity;
       group.totalAmount += lineTotal;
     }
 
@@ -355,7 +394,7 @@ const checkout = async (req, res) => {
         storeName: order.storeName,
         order,
       });
-      notifyNewOrder(order); 
+      notifyNewOrder(order);
     }
     sendOrderConfirmationToUser({
       toEmail: req.user?.email,
@@ -396,7 +435,7 @@ const buyNow = async (req, res) => {
       isActive: true,
       isVerified: true,
     })
-      .select("storeId name productCode images unit variants")
+      .select("storeId name productCode images unit variants mrp offerPrice")
       .lean();
     if (!product) {
       return res
@@ -404,11 +443,14 @@ const buyNow = async (req, res) => {
         .json({ success: false, message: "Product not available" });
     }
 
-    const variant = findActiveVariant(product, variantId);
-    if (!variant) {
-      return res.status(404).json({
+    const source = resolveLineSource(product, variantId);
+    if (!source) {
+      const hasVariants = Array.isArray(product.variants) && product.variants.length > 0;
+      return res.status(400).json({
         success: false,
-        message: "Selected size/weight is not available",
+        message: hasVariants
+          ? "Please select a valid size/weight/color option"
+          : "This product is not available right now",
       });
     }
 
@@ -416,7 +458,7 @@ const buyNow = async (req, res) => {
       _id: product.storeId,
       isActive: true,
     })
-      .select("storeName storeUniqueId email") // 👈 email add holo
+      .select("storeName storeUniqueId email")
       .lean();
     if (!store) {
       return res
@@ -424,11 +466,11 @@ const buyNow = async (req, res) => {
         .json({ success: false, message: "Store is currently unavailable" });
     }
 
-    const totalMrp = round2(variant.mrp * quantity);
-    const totalAmount = round2(variant.offerPrice * quantity);
+    const totalMrp = round2(source.mrp * quantity);
+    const totalAmount = round2(source.offerPrice * quantity);
 
     const order = await OrderModel.create({
-      cartId: null, // ✅ cart chara direct order, tai cartId null thakbe
+      cartId: null, // cart chara direct order, tai cartId null thakbe
       checkoutId: new mongoose.Types.ObjectId(),
       userId,
       storeId: product.storeId,
@@ -437,15 +479,17 @@ const buyNow = async (req, res) => {
       items: [
         {
           productId: product._id,
-          variantId: variant._id,
+          variantId: source.variantId,
           name: product.name,
           productCode: product.productCode,
-          image: product.images?.[0] ?? null,
+          image: source.image,
           unit: product.unit,
-          size: variant.size ?? null,
-          weight: variant.weight ?? null,
-          mrp: variant.mrp,
-          offerPrice: variant.offerPrice,
+          color: source.color,
+          size: source.size,
+          weight: source.weight,
+          height: source.height,
+          mrp: source.mrp,
+          offerPrice: source.offerPrice,
           quantity,
           lineTotal: totalAmount,
         },
@@ -461,13 +505,12 @@ const buyNow = async (req, res) => {
       statusHistory: [{ status: "PENDING", changedBy: userId }],
     });
 
-    // ---- Email notifications (non-blocking, fire-and-forget) ----
     sendNewOrderEmailToStore({
       toEmail: store?.email,
       storeName: order.storeName,
       order,
     });
-    notifyNewOrder(order); 
+    notifyNewOrder(order);
     sendOrderConfirmationToUser({
       toEmail: req.user?.email,
       userName: req.user?.name,
@@ -633,7 +676,6 @@ const cancelMyOrder = async (req, res) => {
       });
     }
 
-    // ---- Email notification (non-blocking, fire-and-forget) ----
     sendOrderStatusUpdateToUser({
       toEmail: req.user?.email,
       userName: req.user?.name,
@@ -782,7 +824,7 @@ const updateOrderStatus = async (req, res) => {
       },
       { new: true },
     )
-      .populate("userId", "name email") // 👈 user email er jonno add holo
+      .populate("userId", "name email")
       .lean();
 
     if (!order) {
@@ -804,7 +846,6 @@ const updateOrderStatus = async (req, res) => {
       });
     }
 
-    // ---- Email notification (non-blocking, fire-and-forget) ----
     sendOrderStatusUpdateToUser({
       toEmail: order.userId?.email,
       userName: order.userId?.name,
