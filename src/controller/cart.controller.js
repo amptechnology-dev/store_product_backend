@@ -8,6 +8,7 @@ const {
   MAX_ITEM_QUANTITY,
   MAX_CART_LINES,
 } = require("../schema/cart.schema.js");
+const { resolveLineSource } = require("../helper/resolveVariant.js");
 
 // ===================== HELPERS =====================
 
@@ -34,51 +35,6 @@ const handleError = (res, error, label) => {
   }
   console.error(`${label}:`, error);
   return res.status(500).json({ success: false, message: "Internal server error" });
-};
-
-// product-er variants array theke ekta specific active variant khoja
-const findActiveVariant = (product, variantId) =>
-  (product?.variants || []).find(
-    (v) => String(v._id) === String(variantId) && v.isActive !== false,
-  );
-
-// variantId thakle -> oi variant er data
-// variantId na thakle -> product ta simple (no variant) hole product-level data
-// product-e variant thakle kintu variantId na dile -> null (invalid, variant select kora lagbe)
-const resolveLineSource = (product, variantId) => {
-  const hasVariants = Array.isArray(product?.variants) && product.variants.length > 0;
-
-  if (variantId) {
-    const variant = findActiveVariant(product, variantId);
-    if (!variant) return null;
-    return {
-      variantId: variant._id,
-      mrp: variant.mrp,
-      offerPrice: variant.offerPrice,
-      stock: variant.stock,
-      color: variant.color ?? null,
-      size: variant.size ?? null,
-      weight: variant.weight ?? null,
-      height: variant.height ?? null,
-      image: variant.images?.[0] ?? product.images?.[0] ?? null,
-    };
-  }
-
-  if (hasVariants) return null; // variant product -> variantId mandatory
-
-  if (product?.mrp === undefined || product?.mrp === null) return null;
-
-  return {
-    variantId: null,
-    mrp: product.mrp,
-    offerPrice: product.offerPrice,
-    stock: product.stock,
-    color: null,
-    size: null,
-    weight: null,
-    height: null,
-    image: product.images?.[0] ?? null,
-  };
 };
 
 const toSnapshot = (product, source) => ({
@@ -124,7 +80,7 @@ const serializeCart = async (cart) => {
 
   const [products, stores] = await Promise.all([
     ProductModel.find({ _id: { $in: productIds } })
-      .select("name productCode images unit variants mrp offerPrice stock isActive isVerified")
+      .select("name productCode images unit variants mrp offerPrice currentStock isActive isVerified")
       .lean(),
     StoreModel.find({ _id: { $in: storeIds } })
       .select("storeName storeUniqueId images isActive")

@@ -9,14 +9,66 @@ const {
 } = require("../schema/product.schema.js");
 const { uploadToR2 } = require("../helper/upload.js");
 const sendProductVerifyEmail = require("../helper/sendProductVerifyEmail.js");
-const { getStoreSettings } = require("../helper/storeSettings.js");
-const {
-  validateProductBySettings,
-} = require("../helper/validateProductBySettings.js");
+const { validateProduct } = require("../helper/validateProduct.js");
 const {
   uploadSimpleImages,
   uploadVariantImages,
 } = require("../helper/productImages.js");
+
+// ---------- Reusable aggregation stage: flatten offerPrice from variants + nested sizeVariants ----------
+const buildOfferPriceStages = () => [
+  {
+    $addFields: {
+      allOfferPrices: {
+        $reduce: {
+          input: { $ifNull: ["$variants", []] },
+          initialValue: [],
+          in: {
+            $concatArrays: [
+              "$$value",
+              {
+                $cond: [
+                  {
+                    $gt: [
+                      { $size: { $ifNull: ["$$this.sizeVariants", []] } },
+                      0,
+                    ],
+                  },
+                  "$$this.sizeVariants.offerPrice",
+                  {
+                    $cond: [
+                      { $ne: [{ $ifNull: ["$$this.offerPrice", null] }, null] },
+                      ["$$this.offerPrice"],
+                      [],
+                    ],
+                  },
+                ],
+              },
+            ],
+          },
+        },
+      },
+    },
+  },
+  {
+    $addFields: {
+      minOfferPrice: {
+        $cond: [
+          { $gt: [{ $size: "$allOfferPrices" }, 0] },
+          { $min: "$allOfferPrices" },
+          "$offerPrice",
+        ],
+      },
+      maxOfferPrice: {
+        $cond: [
+          { $gt: [{ $size: "$allOfferPrices" }, 0] },
+          { $max: "$allOfferPrices" },
+          "$offerPrice",
+        ],
+      },
+    },
+  },
+];
 
 const createProduct = async (req, res) => {
   try {
@@ -28,6 +80,15 @@ const createProduct = async (req, res) => {
         return res
           .status(400)
           .json({ success: false, message: "Invalid variants format" });
+      }
+    }
+    if (typeof body.packagingDetails === "string") {
+      try {
+        body.packagingDetails = JSON.parse(body.packagingDetails);
+      } catch {
+        return res
+          .status(400)
+          .json({ success: false, message: "Invalid packagingDetails format" });
       }
     }
 
@@ -66,27 +127,20 @@ const createProduct = async (req, res) => {
         .json({ success: false, message: "Category not found for this store" });
     }
 
-    // ---------- store settings onujayi dynamic validation ----------
-    const settings = await getStoreSettings(parsedData.storeId);
-    const { errors, data, usesVariants } = validateProductBySettings(
-      settings,
-      body,
-    );
+    const { errors, data, hasVariants, hasColor } = validateProduct(body);
     if (errors.length) {
       return res
         .status(400)
         .json({ success: false, message: "Validation failed", errors });
     }
 
-    // ---------- MAIN PRODUCT IMAGE (mode nirbishese sob somoy upload hobe) ----------
     data.images = await uploadSimpleImages(req.files);
 
-    // ---------- VARIANT (COLOR) IMAGE (shudhu hasColor thakle) ----------
-    if (settings.hasColor) {
-      const variantImageMap = await uploadVariantImages(req.files);
-      data.variants = (data.variants || []).map((v, idx) => ({
-        ...v,
-        images: [...(v.images || []), ...(variantImageMap[idx] || [])],
+    if (hasColor) {
+      const colorImageMap = await uploadVariantImages(req.files);
+      data.variants = (data.variants || []).map((colorVariant, idx) => ({
+        ...colorVariant,
+        images: [...(colorVariant.images || []), ...(colorImageMap[idx] || [])],
       }));
     }
 
@@ -94,14 +148,13 @@ const createProduct = async (req, res) => {
       name: parsedData.name,
       description: parsedData.description,
       unit: parsedData.unit,
-      deliveryTime: parsedData.deliveryTime,
       storeId: parsedData.storeId,
       categoryId: parsedData.categoryId,
       userId,
       isVerified: true,
-      hasVariants: settings.hasVariants,
-      hasColor: settings.hasColor,
-      hasStockManagement: settings.hasStockManagement,
+      hasVariants,
+      hasColor,
+      hasStockManagement: true,
       ...data,
     });
 
@@ -185,6 +238,9 @@ const getAllProducts = async (req, res) => {
       },
       { $unwind: { path: "$category", preserveNullAndEmptyArrays: true } },
 
+      // ---------- FIX: minOfferPrice/maxOfferPrice ekhon nested sizeVariants o dekhe ----------
+      ...buildOfferPriceStages(),
+
       {
         $project: {
           name: 1,
@@ -199,20 +255,8 @@ const getAllProducts = async (req, res) => {
           hasVariants: 1,
           hasColor: 1,
           hasStockManagement: 1,
-          minOfferPrice: {
-            $cond: [
-              { $gt: [{ $size: { $ifNull: ["$variants", []] } }, 0] },
-              { $min: "$variants.offerPrice" },
-              "$offerPrice",
-            ],
-          },
-          maxOfferPrice: {
-            $cond: [
-              { $gt: [{ $size: { $ifNull: ["$variants", []] } }, 0] },
-              { $max: "$variants.offerPrice" },
-              "$offerPrice",
-            ],
-          },
+          minOfferPrice: 1,
+          maxOfferPrice: 1,
           deliveryTime: 1,
           isActive: 1,
           isVerified: 1,
@@ -269,6 +313,21 @@ const getAllProducts = async (req, res) => {
   }
 };
 
+const applyOpeningStockDelta = (
+  existingOpeningStock,
+  existingCurrentStock,
+  newOpeningStock,
+) => {
+  const oldOpening = Number(existingOpeningStock || 0);
+  const oldCurrent = Number(existingCurrentStock || 0);
+  const newOpening = Number(newOpeningStock);
+  const delta = newOpening - oldOpening; // + hole restock, - hole reduce
+  return {
+    openingStock: newOpening,
+    currentStock: Math.max(0, oldCurrent + delta),
+  };
+};
+
 const updateProduct = async (req, res) => {
   try {
     const { id } = req.params;
@@ -306,6 +365,15 @@ const updateProduct = async (req, res) => {
           .json({ success: false, message: "Invalid variants format" });
       }
     }
+    if (typeof body.packagingDetails === "string") {
+      try {
+        body.packagingDetails = JSON.parse(body.packagingDetails);
+      } catch {
+        return res
+          .status(400)
+          .json({ success: false, message: "Invalid packagingDetails format" });
+      }
+    }
 
     const parsedData = updateProductSchema.parse(body);
 
@@ -337,15 +405,7 @@ const updateProduct = async (req, res) => {
       }
     }
 
-    const settings = {
-      hasVariants: existingProduct.hasVariants,
-      hasColor: existingProduct.hasColor,
-      hasStockManagement: existingProduct.hasStockManagement,
-    };
-
-    // ---------- MAIN PRODUCT IMAGE (mode nirbishese sob somoy update hobe) ----------
-    // "images" field e frontend theke remaining existing URL gulo (string) ashe
-    // r notun file gulo "image0","image1"... fieldname diye
+    // ---------- MAIN PRODUCT IMAGE ----------
     const existingMainImages = body.images
       ? Array.isArray(body.images)
         ? body.images
@@ -356,44 +416,106 @@ const updateProduct = async (req, res) => {
 
     let updateData = { ...parsedData, images: finalMainImages };
 
-    const isPricingUpdate =
+    // variants/pricing/stock somporkito kono field ashle notun kore structure decide hobe
+    const isStructuralUpdate =
       body.variants !== undefined ||
       body.mrp !== undefined ||
       body.offerPrice !== undefined ||
-      body.stock !== undefined;
+      body.openingStock !== undefined;
 
-    if (isPricingUpdate) {
-      const { errors, data, usesVariants } = validateProductBySettings(
-        settings,
-        body,
-      );
+    if (isStructuralUpdate) {
+      const { errors, data, hasVariants, hasColor } = validateProduct(body);
       if (errors.length) {
         return res
           .status(400)
           .json({ success: false, message: "Validation failed", errors });
       }
 
-      if (existingProduct.hasColor) {
-        const variantImageMap = await uploadVariantImages(req.files);
-        data.variants = (data.variants || []).map((v, idx) => ({
-          ...v,
-          images: [...(v.images || []), ...(variantImageMap[idx] || [])],
+      if (hasColor) {
+        const colorImageMap = await uploadVariantImages(req.files);
+        data.variants = (data.variants || []).map((colorVariant, idx) => ({
+          ...colorVariant,
+          images: [
+            ...(colorVariant.images || []),
+            ...(colorImageMap[idx] || []),
+          ],
         }));
       }
 
-      updateData = { ...updateData, ...data, images: finalMainImages };
+      // ---------- Stock: delta logic, existing sold stock na hariye ----------
+      if (!hasVariants) {
+        // simple product
+        if (body.openingStock !== undefined) {
+          Object.assign(
+            data,
+            applyOpeningStockDelta(
+              existingProduct.openingStock,
+              existingProduct.currentStock,
+              body.openingStock,
+            ),
+          );
+        } else {
+          // openingStock notun kore deyni -> purono stock retain
+          data.openingStock = existingProduct.openingStock;
+          data.currentStock = existingProduct.currentStock;
+        }
+      } else {
+        // variant/color level e - proti variant-er jonno existing match kore delta lagano
+        const existingFlat = [];
+        (existingProduct.variants || []).forEach((v) => {
+          if (Array.isArray(v.sizeVariants) && v.sizeVariants.length) {
+            v.sizeVariants.forEach((sv) => existingFlat.push(sv));
+          } else {
+            existingFlat.push(v);
+          }
+        });
+
+        let flatIdx = 0;
+        const applyToVariant = (variant) => {
+          const prev = existingFlat[flatIdx];
+          flatIdx += 1;
+          if (prev && variant.openingStock !== undefined) {
+            Object.assign(
+              variant,
+              applyOpeningStockDelta(
+                prev.openingStock,
+                prev.currentStock,
+                variant.openingStock,
+              ),
+            );
+          } else if (prev) {
+            variant.openingStock = prev.openingStock;
+            variant.currentStock = prev.currentStock;
+          }
+        };
+
+        data.variants.forEach((v) => {
+          if (Array.isArray(v.sizeVariants) && v.sizeVariants.length) {
+            v.sizeVariants.forEach(applyToVariant);
+          } else {
+            applyToVariant(v);
+          }
+        });
+      }
+
+      updateData = {
+        ...updateData,
+        ...data,
+        images: finalMainImages,
+        hasVariants,
+        hasColor,
+      };
     } else if (existingProduct.hasColor && req.files?.length) {
-      const variantImageMap = await uploadVariantImages(req.files);
-      if (Object.keys(variantImageMap).length) {
-        updateData.variants = (existingProduct.variants || []).map(
-          (v, idx) => {
-            const obj = v.toObject ? v.toObject() : v;
-            return {
-              ...obj,
-              images: [...(obj.images || []), ...(variantImageMap[idx] || [])],
-            };
-          },
-        );
+      // sudhu notun color-image add hocche, pricing/stock change hocche na
+      const colorImageMap = await uploadVariantImages(req.files);
+      if (Object.keys(colorImageMap).length) {
+        updateData.variants = (existingProduct.variants || []).map((v, idx) => {
+          const obj = v.toObject ? v.toObject() : v;
+          return {
+            ...obj,
+            images: [...(obj.images || []), ...(colorImageMap[idx] || [])],
+          };
+        });
       }
     }
 
@@ -537,6 +659,9 @@ const allProductWithStore = async (req, res) => {
       },
       { $unwind: { path: "$category", preserveNullAndEmptyArrays: true } },
 
+      // ---------- FIX: minOfferPrice/maxOfferPrice ekhon nested sizeVariants o dekhe ----------
+      ...buildOfferPriceStages(),
+
       {
         $project: {
           name: 1,
@@ -545,8 +670,8 @@ const allProductWithStore = async (req, res) => {
           description: 1,
           unit: 1,
           variants: 1,
-          minOfferPrice: { $min: "$variants.offerPrice" },
-          maxOfferPrice: { $max: "$variants.offerPrice" },
+          minOfferPrice: 1,
+          maxOfferPrice: 1,
           deliveryTime: 1,
 
           isActive: 1,
@@ -655,36 +780,29 @@ const fetchStoreProducts = async (store, query, categoryId) => {
 
   const pipeline = [{ $match: match }];
 
+  // ---------- FIX: minOfferPrice ekhon nested sizeVariants soho calculate hoy, tai price-filter ekhon age na kore ei stage-er pore kora hocche ----------
+  pipeline.push(...buildOfferPriceStages());
+
   if (minPrice !== null || maxPrice !== null) {
     const priceRange = {};
     if (minPrice !== null) priceRange.$gte = minPrice;
     if (maxPrice !== null) priceRange.$lte = maxPrice;
 
+    const cmp = {};
+    if (minPrice !== null) cmp.$gte = ["$maxOfferPrice", minPrice];
+    if (maxPrice !== null) cmp.$lte = ["$minOfferPrice", maxPrice];
+
     pipeline.push({
       $match: {
-        $or: [
-          {
-            variants: {
-              $elemMatch: { offerPrice: priceRange, isActive: true },
-            },
-          },
-          { $and: [{ variants: { $size: 0 } }, { offerPrice: priceRange }] },
-        ],
+        $expr:
+          minPrice !== null && maxPrice !== null
+            ? { $and: [{ $gte: ["$maxOfferPrice", minPrice] }, { $lte: ["$minOfferPrice", maxPrice] }] }
+            : minPrice !== null
+              ? { $gte: ["$maxOfferPrice", minPrice] }
+              : { $lte: ["$minOfferPrice", maxPrice] },
       },
     });
   }
-
-  pipeline.push({
-    $addFields: {
-      minOfferPrice: {
-        $cond: [
-          { $gt: [{ $size: { $ifNull: ["$variants", []] } }, 0] },
-          { $min: "$variants.offerPrice" },
-          "$offerPrice",
-        ],
-      },
-    },
-  });
 
   let sort;
   if (query.sortBy === "price_asc") sort = { minOfferPrice: 1, _id: -1 };
@@ -872,30 +990,42 @@ const getStoreProducts = async (req, res) => {
       .populate({ path: "reviews.userId", select: "name picture" })
       .lean();
 
+    // ---------- FIX: flat helper to get offerPrice list for a product (color+sizeVariants soho) ----------
+    const getOfferPrices = (p) => {
+      const prices = [];
+      (p.variants || []).forEach((v) => {
+        if (Array.isArray(v.sizeVariants) && v.sizeVariants.length) {
+          v.sizeVariants.forEach((sv) => {
+            if (sv.offerPrice !== undefined && sv.offerPrice !== null)
+              prices.push(sv.offerPrice);
+          });
+        } else if (v.offerPrice !== undefined && v.offerPrice !== null) {
+          prices.push(v.offerPrice);
+        }
+      });
+      if (!prices.length && p.offerPrice !== undefined && p.offerPrice !== null) {
+        prices.push(p.offerPrice);
+      }
+      return prices;
+    };
+
     const minPrice = toPositiveNumber(req.query.minPrice);
     const maxPrice = toPositiveNumber(req.query.maxPrice);
     if (minPrice !== null || maxPrice !== null) {
       products = products.filter((p) => {
-        if (p.variants?.length) {
-          return p.variants.some(
-            (v) =>
-              v.isActive !== false &&
-              (minPrice === null || v.offerPrice >= minPrice) &&
-              (maxPrice === null || v.offerPrice <= maxPrice),
-          );
-        }
-        if (p.offerPrice === undefined || p.offerPrice === null) return false;
-        return (
-          (minPrice === null || p.offerPrice >= minPrice) &&
-          (maxPrice === null || p.offerPrice <= maxPrice)
+        const prices = getOfferPrices(p);
+        if (!prices.length) return false;
+        return prices.some(
+          (price) =>
+            (minPrice === null || price >= minPrice) &&
+            (maxPrice === null || price <= maxPrice),
         );
       });
     }
 
     products = products.map((p) => {
-      const minOfferPrice = p.variants?.length
-        ? Math.min(...p.variants.map((v) => v.offerPrice))
-        : (p.offerPrice ?? null);
+      const prices = getOfferPrices(p);
+      const minOfferPrice = prices.length ? Math.min(...prices) : null;
 
       const reviews = p.reviews || [];
       const maxReview =

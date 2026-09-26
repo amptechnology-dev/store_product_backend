@@ -1,14 +1,23 @@
 const mongoose = require("mongoose");
 const { getNextSequence } = require("../helper/counter.js");
 
-const variantSchema = new mongoose.Schema(
+const packagingDetailsSchema = new mongoose.Schema(
   {
-    color: { type: String, trim: true }, // uppercase remove kora holo
+    expectedDeliveryDays: { type: Number, min: 0 },
+    length: { type: Number, min: 0 },
+    breadth: { type: Number, min: 0 },
+    height: { type: Number, min: 0 },
+    weight: { type: Number, min: 0 },
+  },
+  { _id: false },
+);
+
+// nested size/weight/height row inside a color variant
+const sizeVariantSchema = new mongoose.Schema(
+  {
     size: { type: String, trim: true },
     weight: { type: String, trim: true },
     height: { type: String, trim: true },
-    images: [{ type: String }], // color/variant wise image
-
     mrp: {
       type: Number,
       required: [true, "MRP is required"],
@@ -25,9 +34,56 @@ const variantSchema = new mongoose.Schema(
         message: "Offer price cannot be greater than MRP",
       },
     },
-    stock: { type: Number, default: 0, min: [0, "Stock must be >= 0"] },
+    openingStock: { type: Number, default: 0, min: 0 },
+    currentStock: { type: Number, default: 0, min: 0 },
     sku: { type: String, trim: true },
     isActive: { type: Boolean, default: true },
+    packagingDetails: packagingDetailsSchema,
+  },
+  { timestamps: false },
+);
+
+// top-level variant: either flat (size/weight/height) OR color (optionally with nested sizeVariants)
+const variantSchema = new mongoose.Schema(
+  {
+    color: { type: String, trim: true },
+    images: [{ type: String }],
+
+    size: { type: String, trim: true },
+    weight: { type: String, trim: true },
+    height: { type: String, trim: true },
+
+    // required ONLY when this variant has no nested sizeVariants
+    mrp: {
+      type: Number,
+      min: [0, "MRP must be >= 0"],
+      required: function () {
+        return !this.sizeVariants || this.sizeVariants.length === 0;
+      },
+    },
+    offerPrice: {
+      type: Number,
+      min: [0, "Offer price must be >= 0"],
+      required: function () {
+        return !this.sizeVariants || this.sizeVariants.length === 0;
+      },
+      validate: {
+        validator: function (value) {
+          if (value === undefined || value === null) return true;
+          return this.mrp === undefined || value <= this.mrp;
+        },
+        message: "Offer price cannot be greater than MRP",
+      },
+    },
+
+    openingStock: { type: Number, default: 0, min: 0 },
+    currentStock: { type: Number, default: 0, min: 0 },
+    sku: { type: String, trim: true },
+    isActive: { type: Boolean, default: true },
+    packagingDetails: packagingDetailsSchema,
+
+    // present only when hasColor + per-size pricing under this color
+    sizeVariants: { type: [sizeVariantSchema], default: [] },
   },
   { timestamps: false },
 );
@@ -53,31 +109,21 @@ const reviewSchema = new mongoose.Schema(
 
 const productSchema = new mongoose.Schema(
   {
-    name: {
-      type: String,
-      required: [true, "Product name is required"],
-      trim: true, // uppercase remove kora holo
-    },
+    name: { type: String, required: [true, "Product name is required"], trim: true },
     productCode: { type: String, unique: true },
-    description: {
-      type: String,
-      required: [true, "Product description is required"],
-      trim: true, // uppercase remove kora holo
-    },
-    unit: {
-      type: String,
-      required: [true, "Unit is required"],
-      trim: true, // uppercase remove kora holo
-    },
+    description: { type: String, required: [true, "Product description is required"], trim: true },
+    unit: { type: String, required: [true, "Unit is required"], trim: true },
     deliveryTime: { type: String, trim: true },
 
-    // ---------- Main product image (always thake, variant mode hok ba na hok) ----------
     images: [{ type: String }],
+
+    // simple (no-variant) product fields
     mrp: { type: Number, min: [0, "MRP must be >= 0"] },
     offerPrice: { type: Number, min: [0, "Offer price must be >= 0"] },
-    stock: { type: Number, default: 0, min: [0, "Stock must be >= 0"] },
+    openingStock: { type: Number, default: 0, min: 0 },
+    currentStock: { type: Number, default: 0, min: 0 },
+    packagingDetails: packagingDetailsSchema,
 
-    // ---------- Variant mode (hasVariants ba hasColor kono ekta true) ----------
     variants: { type: [variantSchema], default: [] },
 
     hasVariants: { type: Boolean, default: false },
@@ -86,21 +132,9 @@ const productSchema = new mongoose.Schema(
 
     isActive: { type: Boolean, default: true },
     isVerified: { type: Boolean, default: false },
-    storeId: {
-      type: mongoose.Schema.Types.ObjectId,
-      ref: "Store",
-      required: true,
-    },
-    categoryId: {
-      type: mongoose.Schema.Types.ObjectId,
-      ref: "Category",
-      required: true,
-    },
-    userId: {
-      type: mongoose.Schema.Types.ObjectId,
-      ref: "User",
-      required: true,
-    },
+    storeId: { type: mongoose.Schema.Types.ObjectId, ref: "Store", required: true },
+    categoryId: { type: mongoose.Schema.Types.ObjectId, ref: "Category", required: true },
+    userId: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true },
 
     reviews: [reviewSchema],
     averageRating: { type: Number, default: 0, min: 0, max: 5 },

@@ -16,6 +16,7 @@ const {
   sendOrderStatusUpdateToUser,
 } = require("../helper/orderMail.js");
 const { notifyNewOrder } = require("../helper/notification.helper.js");
+const { resolveLineSource } = require("../helper/resolveVariant.js");
 
 // ===================== HELPERS =====================
 
@@ -87,49 +88,6 @@ const paginated = ({ page, limit, total, orders }) => ({
   totalOrders: total,
   orders,
 });
-
-// product-er variants array theke ekta specific active variant khoja
-const findActiveVariant = (product, variantId) =>
-  (product?.variants || []).find(
-    (v) => String(v._id) === String(variantId) && v.isActive !== false,
-  );
-
-// variantId thakle -> oi variant er data (color/size/weight/height/image soho)
-// variantId na thakle -> product simple (no variant) hole product-level data
-// product-e variant thakle kintu variantId na dile -> null
-const resolveLineSource = (product, variantId) => {
-  const hasVariants = Array.isArray(product?.variants) && product.variants.length > 0;
-
-  if (variantId) {
-    const variant = findActiveVariant(product, variantId);
-    if (!variant) return null;
-    return {
-      variantId: variant._id,
-      mrp: variant.mrp,
-      offerPrice: variant.offerPrice,
-      color: variant.color ?? null,
-      size: variant.size ?? null,
-      weight: variant.weight ?? null,
-      height: variant.height ?? null,
-      image: variant.images?.[0] ?? product.images?.[0] ?? null,
-    };
-  }
-
-  if (hasVariants) return null;
-
-  if (product?.mrp === undefined || product?.mrp === null) return null;
-
-  return {
-    variantId: null,
-    mrp: product.mrp,
-    offerPrice: product.offerPrice,
-    color: null,
-    size: null,
-    weight: null,
-    height: null,
-    image: product.images?.[0] ?? null,
-  };
-};
 
 const getOrdersGroupedByStore = async (
   userId,
@@ -445,7 +403,8 @@ const buyNow = async (req, res) => {
 
     const source = resolveLineSource(product, variantId);
     if (!source) {
-      const hasVariants = Array.isArray(product.variants) && product.variants.length > 0;
+      const hasVariants =
+        Array.isArray(product.variants) && product.variants.length > 0;
       return res.status(400).json({
         success: false,
         message: hasVariants
