@@ -43,6 +43,7 @@ const wishlistRoutes = require("./src/routes/wishlist.route.js");
 const productreviewRoutes = require("./src/routes/productReview.route.js");
 const notificationRoutes = require("./src/routes/notification.route.js");
 const storeSettingRoutes = require("./src/routes/storeSetting.routes.js");
+const workerRoutes = require("./src/routes/worker.routes.js");
 
 app.use("/api/register", registerRoutes);
 app.use("/api/login", loginRoutes);
@@ -61,6 +62,7 @@ app.use("/api/wishlist", wishlistRoutes);
 app.use("/api/product", productreviewRoutes);
 app.use("/api/notifications",notificationRoutes);
 app.use("/api/store-settings", storeSettingRoutes);
+app.use("/api/worker", workerRoutes);
 
 const port = process.env.PORT || 8090;
 
