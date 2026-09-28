@@ -17,9 +17,16 @@ const {
   logStockChange,
   findUnitStock,
 } = require("../helper/stockManager.js");
+const { notifyNewOrder } = require("../helper/notification.helper.js");
 
 // ===================== CONSTANTS / HELPERS =====================
-const ORDER_STATUSES = ["PENDING", "CONFIRMED", "SHIPPED", "DELIVERED", "CANCELLED"];
+const ORDER_STATUSES = [
+  "PENDING",
+  "CONFIRMED",
+  "SHIPPED",
+  "DELIVERED",
+  "CANCELLED",
+];
 
 // frontend er getNextStatuses er sathe mil rakho
 const ALLOWED_TRANSITIONS = {
@@ -39,7 +46,10 @@ const escapeRegex = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
 const parsePagination = (query) => {
   const pageNum = Math.max(parseInt(query.page) || 1, 1);
-  const limitNum = Math.min(Math.max(parseInt(query.limit) || 10, 1), MAX_LIMIT);
+  const limitNum = Math.min(
+    Math.max(parseInt(query.limit) || 10, 1),
+    MAX_LIMIT,
+  );
   return { pageNum, limitNum };
 };
 
@@ -55,7 +65,9 @@ const handleError = (res, error, label) => {
     });
   }
   console.error(`${label}:`, error);
-  return res.status(500).json({ success: false, message: "Internal server error" });
+  return res
+    .status(500)
+    .json({ success: false, message: "Internal server error" });
 };
 
 // Ei STORE-user er nijer shob store er id
@@ -78,14 +90,21 @@ const transitionOrder = async ({
   extra = {},
   populateUser = false,
 }) => {
-  const validFrom = ORDER_STATUSES.filter((s) => ALLOWED_TRANSITIONS[s].includes(status));
+  const validFrom = ORDER_STATUSES.filter((s) =>
+    ALLOWED_TRANSITIONS[s].includes(status),
+  );
 
   let query = OrderModel.findOneAndUpdate(
     { _id: orderId, ...filter, status: { $in: validFrom } },
     {
       $set: { status, ...extra },
       $push: {
-        statusHistory: { status, changedBy: userId, note: note || null, at: new Date() },
+        statusHistory: {
+          status,
+          changedBy: userId,
+          note: note || null,
+          at: new Date(),
+        },
       },
     },
     { new: true },
@@ -187,9 +206,14 @@ const attemptStoreCheckout = async ({
       quantity: line.quantity,
       productName: product.name,
       variantLabel:
-        [source.color, source.size, source.weight, source.height].filter(Boolean).join(" / ") ||
-        "Default",
-      newStock: findUnitStock(result.product, unit.variantId, unit.sizeVariantId),
+        [source.color, source.size, source.weight, source.height]
+          .filter(Boolean)
+          .join(" / ") || "Default",
+      newStock: findUnitStock(
+        result.product,
+        unit.variantId,
+        unit.sizeVariantId,
+      ),
     });
 
     orderItems.push({
@@ -217,8 +241,12 @@ const attemptStoreCheckout = async ({
   }
 
   const totalItems = orderItems.reduce((sum, i) => sum + i.quantity, 0);
-  const totalMrp = round2(orderItems.reduce((sum, i) => sum + i.mrp * i.quantity, 0));
-  const totalAmount = round2(orderItems.reduce((sum, i) => sum + i.lineTotal, 0));
+  const totalMrp = round2(
+    orderItems.reduce((sum, i) => sum + i.mrp * i.quantity, 0),
+  );
+  const totalAmount = round2(
+    orderItems.reduce((sum, i) => sum + i.lineTotal, 0),
+  );
   const discount = round2(totalMrp - totalAmount);
 
   // ---------- order create fail korle stock ferot dao ----------
@@ -271,7 +299,9 @@ const attemptStoreCheckout = async ({
 const restoreOrderStock = async (order, userId) => {
   await Promise.all(
     order.items.map(async (item) => {
-      const product = await ProductModel.findById(item.productId).select("variants");
+      const product = await ProductModel.findById(item.productId).select(
+        "variants",
+      );
       if (!product) return;
 
       const unit = locateStockUnit(product, item.variantId);
@@ -285,7 +315,11 @@ const restoreOrderStock = async (order, userId) => {
       });
 
       if (restored) {
-        const newStock = findUnitStock(restored, unit.variantId, unit.sizeVariantId);
+        const newStock = findUnitStock(
+          restored,
+          unit.variantId,
+          unit.sizeVariantId,
+        );
         await logStockChange({
           productId: item.productId,
           storeId: order.storeId,
@@ -294,8 +328,9 @@ const restoreOrderStock = async (order, userId) => {
           sizeVariantId: unit.sizeVariantId,
           productName: item.name,
           variantLabel:
-            [item.color, item.size, item.weight, item.height].filter(Boolean).join(" / ") ||
-            "Default",
+            [item.color, item.size, item.weight, item.height]
+              .filter(Boolean)
+              .join(" / ") || "Default",
           type: "IN",
           reason: "OTHER",
           note: `Order ${order.orderNumber} cancelled`,
@@ -317,7 +352,9 @@ const checkout = async (req, res) => {
 
     const cart = await CartModel.findOne({ _id: cartId, userId });
     if (!cart) {
-      return res.status(404).json({ success: false, message: "Cart not found" });
+      return res
+        .status(404)
+        .json({ success: false, message: "Cart not found" });
     }
 
     let items = cart.items;
@@ -327,7 +364,9 @@ const checkout = async (req, res) => {
     }
 
     if (items.length === 0) {
-      return res.status(400).json({ success: false, message: "No items to checkout" });
+      return res
+        .status(400)
+        .json({ success: false, message: "No items to checkout" });
     }
 
     // ---------- store wise group ----------
@@ -371,7 +410,10 @@ const checkout = async (req, res) => {
       } catch (err) {
         // ekta store e unexpected error hole baki store der jeno atke na jay
         console.error(`Checkout failed for store ${storeId}:`, err);
-        failedStores.push({ storeId, message: "Could not place order for this store" });
+        failedStores.push({
+          storeId,
+          message: "Could not place order for this store",
+        });
       }
     }
 
@@ -382,7 +424,11 @@ const checkout = async (req, res) => {
         {
           $pull: {
             items: {
-              storeId: { $in: successfulStoreIds.map((id) => new mongoose.Types.ObjectId(id)) },
+              storeId: {
+                $in: successfulStoreIds.map(
+                  (id) => new mongoose.Types.ObjectId(id),
+                ),
+              },
             },
           },
         },
@@ -395,6 +441,17 @@ const checkout = async (req, res) => {
         message: "Checkout failed for all stores",
         failedStores,
       });
+    }
+
+    if (createdOrders.length === 0) {
+      return res.status(409).json({
+        success: false,
+        message: "Checkout failed for all stores",
+        failedStores,
+      });
+    }
+    for (const order of createdOrders) {
+      notifyNewOrder(order);
     }
 
     return res.status(201).json({
@@ -416,8 +473,14 @@ const checkout = async (req, res) => {
 const buyNow = async (req, res) => {
   try {
     const userId = getUserId(req);
-    const { productId, variantId, quantity, deliveryAddress, note, paymentMethod } =
-      directCheckoutSchema.parse(req.body);
+    const {
+      productId,
+      variantId,
+      quantity,
+      deliveryAddress,
+      note,
+      paymentMethod,
+    } = directCheckoutSchema.parse(req.body);
 
     const product = await ProductModel.findOne({
       _id: productId,
@@ -425,7 +488,9 @@ const buyNow = async (req, res) => {
       isVerified: true,
     });
     if (!product) {
-      return res.status(404).json({ success: false, message: "Product not available" });
+      return res
+        .status(404)
+        .json({ success: false, message: "Product not available" });
     }
 
     const result = await attemptStoreCheckout({
@@ -445,6 +510,8 @@ const buyNow = async (req, res) => {
       });
     }
 
+    notifyNewOrder(result.order);
+
     return res.status(201).json({
       success: true,
       message: "Order placed successfully",
@@ -463,7 +530,9 @@ const getMyOrders = async (req, res) => {
     const { status } = req.query;
 
     if (status && !ORDER_STATUSES.includes(status)) {
-      return res.status(400).json({ success: false, message: "Invalid status" });
+      return res
+        .status(400)
+        .json({ success: false, message: "Invalid status" });
     }
 
     const match = { userId };
@@ -501,7 +570,9 @@ const getMyOrdersByStore = async (req, res) => {
     const { status } = req.query;
 
     if (status && !ORDER_STATUSES.includes(status)) {
-      return res.status(400).json({ success: false, message: "Invalid status" });
+      return res
+        .status(400)
+        .json({ success: false, message: "Invalid status" });
     }
 
     const match = { userId: new mongoose.Types.ObjectId(userId) };
@@ -545,12 +616,19 @@ const getMyOrderById = async (req, res) => {
   try {
     const { orderId } = req.params;
     if (!mongoose.isValidObjectId(orderId)) {
-      return res.status(400).json({ success: false, message: "Invalid order id" });
+      return res
+        .status(400)
+        .json({ success: false, message: "Invalid order id" });
     }
 
-    const order = await OrderModel.findOne({ _id: orderId, userId: getUserId(req) }).lean();
+    const order = await OrderModel.findOne({
+      _id: orderId,
+      userId: getUserId(req),
+    }).lean();
     if (!order) {
-      return res.status(404).json({ success: false, message: "Order not found" });
+      return res
+        .status(404)
+        .json({ success: false, message: "Order not found" });
     }
 
     return res.status(200).json({ success: true, order });
@@ -567,14 +645,20 @@ const cancelMyOrder = async (req, res) => {
     const userId = getUserId(req);
 
     if (!mongoose.isValidObjectId(orderId)) {
-      return res.status(400).json({ success: false, message: "Invalid order id" });
+      return res
+        .status(400)
+        .json({ success: false, message: "Invalid order id" });
     }
 
     const { reason } = cancelOrderSchema.parse(req.body);
 
-    const existing = await OrderModel.findOne({ _id: orderId, userId }).select("status").lean();
+    const existing = await OrderModel.findOne({ _id: orderId, userId })
+      .select("status")
+      .lean();
     if (!existing) {
-      return res.status(404).json({ success: false, message: "Order not found" });
+      return res
+        .status(404)
+        .json({ success: false, message: "Order not found" });
     }
 
     if (!ALLOWED_TRANSITIONS[existing.status].includes("CANCELLED")) {
@@ -619,10 +703,13 @@ const getStoreOrders = async (req, res) => {
   try {
     const userId = getUserId(req);
     const { storeId, status } = req.query;
-    const search = typeof req.query.search === "string" ? req.query.search.trim() : "";
+    const search =
+      typeof req.query.search === "string" ? req.query.search.trim() : "";
 
     if (status && !ORDER_STATUSES.includes(status)) {
-      return res.status(400).json({ success: false, message: "Invalid status" });
+      return res
+        .status(400)
+        .json({ success: false, message: "Invalid status" });
     }
 
     // ---------- shudhu nijer store er order ----------
@@ -631,10 +718,14 @@ const getStoreOrders = async (req, res) => {
 
     if (storeId) {
       if (!mongoose.isValidObjectId(storeId)) {
-        return res.status(400).json({ success: false, message: "Invalid store id" });
+        return res
+          .status(400)
+          .json({ success: false, message: "Invalid store id" });
       }
       if (!ownedStoreIds.some((id) => String(id) === String(storeId))) {
-        return res.status(403).json({ success: false, message: "Not authorized for this store" });
+        return res
+          .status(403)
+          .json({ success: false, message: "Not authorized for this store" });
       }
       match.storeId = storeId;
     } else {
@@ -695,18 +786,24 @@ const getStoreOrderById = async (req, res) => {
     const userId = getUserId(req);
 
     if (!mongoose.isValidObjectId(orderId)) {
-      return res.status(400).json({ success: false, message: "Invalid order id" });
+      return res
+        .status(400)
+        .json({ success: false, message: "Invalid order id" });
     }
 
     const order = await OrderModel.findById(orderId)
       .populate("userId", CUSTOMER_FIELDS)
       .lean();
     if (!order) {
-      return res.status(404).json({ success: false, message: "Order not found" });
+      return res
+        .status(404)
+        .json({ success: false, message: "Order not found" });
     }
 
     if (!(await isStoreOwner(order.storeId, userId))) {
-      return res.status(403).json({ success: false, message: "Not authorized to view this order" });
+      return res
+        .status(403)
+        .json({ success: false, message: "Not authorized to view this order" });
     }
 
     return res.status(200).json({ success: true, order });
@@ -723,20 +820,27 @@ const updateOrderStatus = async (req, res) => {
     const userId = getUserId(req);
 
     if (!mongoose.isValidObjectId(orderId)) {
-      return res.status(400).json({ success: false, message: "Invalid order id" });
+      return res
+        .status(400)
+        .json({ success: false, message: "Invalid order id" });
     }
 
     const { status, note } = updateOrderStatusSchema.parse(req.body);
 
-    const existing = await OrderModel.findById(orderId).select("storeId status").lean();
+    const existing = await OrderModel.findById(orderId)
+      .select("storeId status")
+      .lean();
     if (!existing) {
-      return res.status(404).json({ success: false, message: "Order not found" });
+      return res
+        .status(404)
+        .json({ success: false, message: "Order not found" });
     }
 
     if (!(await isStoreOwner(existing.storeId, userId))) {
-      return res
-        .status(403)
-        .json({ success: false, message: "Not authorized to update this order" });
+      return res.status(403).json({
+        success: false,
+        message: "Not authorized to update this order",
+      });
     }
 
     if (!ALLOWED_TRANSITIONS[existing.status].includes(status)) {
