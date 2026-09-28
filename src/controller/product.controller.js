@@ -127,7 +127,9 @@ const createProduct = async (req, res) => {
         .json({ success: false, message: "Category not found for this store" });
     }
 
-    const { errors, data, hasVariants, hasColor } = validateProduct(body);
+    const { errors, data, hasVariants, hasColor } = validateProduct(body, {
+      files: req.files,
+    });
     if (errors.length) {
       return res
         .status(400)
@@ -424,7 +426,10 @@ const updateProduct = async (req, res) => {
       body.openingStock !== undefined;
 
     if (isStructuralUpdate) {
-      const { errors, data, hasVariants, hasColor } = validateProduct(body);
+      const { errors, data, hasVariants, hasColor } = validateProduct(body, {
+        files: req.files,
+        existingMainImages,
+      });
       if (errors.length) {
         return res
           .status(400)
@@ -796,7 +801,12 @@ const fetchStoreProducts = async (store, query, categoryId) => {
       $match: {
         $expr:
           minPrice !== null && maxPrice !== null
-            ? { $and: [{ $gte: ["$maxOfferPrice", minPrice] }, { $lte: ["$minOfferPrice", maxPrice] }] }
+            ? {
+                $and: [
+                  { $gte: ["$maxOfferPrice", minPrice] },
+                  { $lte: ["$minOfferPrice", maxPrice] },
+                ],
+              }
             : minPrice !== null
               ? { $gte: ["$maxOfferPrice", minPrice] }
               : { $lte: ["$minOfferPrice", maxPrice] },
@@ -1003,7 +1013,11 @@ const getStoreProducts = async (req, res) => {
           prices.push(v.offerPrice);
         }
       });
-      if (!prices.length && p.offerPrice !== undefined && p.offerPrice !== null) {
+      if (
+        !prices.length &&
+        p.offerPrice !== undefined &&
+        p.offerPrice !== null
+      ) {
         prices.push(p.offerPrice);
       }
       return prices;

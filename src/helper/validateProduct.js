@@ -1,12 +1,14 @@
 // helper/validateProduct.js
 
+const isBlank = (v) => v === undefined || v === null || v === "";
+const toNum = (v) => (isBlank(v) ? undefined : Number(v));
+
 const buildPackaging = (input = {}) => ({
-  expectedDeliveryDays:
-    input.expectedDeliveryDays !== undefined ? Number(input.expectedDeliveryDays) : undefined,
-  length: input.length !== undefined ? Number(input.length) : undefined,
-  breadth: input.breadth !== undefined ? Number(input.breadth) : undefined,
-  height: input.height !== undefined ? Number(input.height) : undefined,
-  weight: input.weight !== undefined ? Number(input.weight) : undefined,
+  expectedDeliveryDays: toNum(input.expectedDeliveryDays),
+  length: toNum(input.length),
+  breadth: toNum(input.breadth),
+  height: toNum(input.height),
+  weight: toNum(input.weight),
 });
 
 const buildStock = (input = {}) => {
@@ -14,151 +16,177 @@ const buildStock = (input = {}) => {
   return { openingStock, currentStock: openingStock };
 };
 
-// ---------- Ekta sizeVariant "truly empty" kina check kora ----------
-// size/weight/height/mrp/offerPrice - kono field e kono value nei mane eta
-// UI-r stray default row, real data na. Eita silently skip kora hobe.
-const isEmptySizeVariant = (raw = {}) => {
-  const hasText = raw.size || raw.weight || raw.height || raw.sku;
-  const hasPricing =
-    raw.mrp !== undefined && raw.mrp !== null && raw.mrp !== "" &&
-    raw.offerPrice !== undefined && raw.offerPrice !== null && raw.offerPrice !== "";
-  return !hasText && !hasPricing;
-};
+const hasAttribute = (raw = {}) => !!(raw.size || raw.weight || raw.height);
 
-// ---------- Ekta colorVariant "truly empty" kina check kora ----------
-const isEmptyColorVariant = (raw = {}) => {
-  const hasColor = !!raw.color;
-  const hasSizeVariants = Array.isArray(raw.sizeVariants) && raw.sizeVariants.length > 0;
-  const hasPricing =
-    raw.mrp !== undefined && raw.mrp !== null && raw.mrp !== "" &&
-    raw.offerPrice !== undefined && raw.offerPrice !== null && raw.offerPrice !== "";
-  return !hasColor && !hasSizeVariants && !hasPricing;
-};
+// Row-ta puropuri khali (UI-r stray default row) kina
+const isEmptySizeVariant = (raw = {}) =>
+  !hasAttribute(raw) && !raw.sku && isBlank(raw.mrp) && isBlank(raw.offerPrice);
 
+// MRP required, offerPrice optional. offerPrice na thakle = mrp
 const validatePricing = (raw, errors, path) => {
-  if (raw.mrp === undefined || raw.mrp === null || raw.mrp === "") {
-    errors.push({ field: `${path}.mrp`, message: "MRP is required" });
+  const prefix = path ? `${path}.` : "";
+  if (isBlank(raw.mrp)) {
+    errors.push({ field: `${prefix}mrp`, message: "MRP is required" });
+  } else if (Number.isNaN(Number(raw.mrp)) || Number(raw.mrp) < 0) {
+    errors.push({ field: `${prefix}mrp`, message: "MRP must be a valid number >= 0" });
   }
-  if (raw.offerPrice === undefined || raw.offerPrice === null || raw.offerPrice === "") {
-    errors.push({ field: `${path}.offerPrice`, message: "Offer price is required" });
+  if (!isBlank(raw.offerPrice) && !isBlank(raw.mrp)) {
+    if (Number(raw.offerPrice) > Number(raw.mrp)) {
+      errors.push({
+        field: `${prefix}offerPrice`,
+        message: "Offer price cannot be greater than MRP",
+      });
+    }
   }
-  if (
-    raw.mrp !== undefined &&
-    raw.offerPrice !== undefined &&
-    Number(raw.offerPrice) > Number(raw.mrp)
-  ) {
-    errors.push({ field: `${path}.offerPrice`, message: "Offer price cannot be greater than MRP" });
-  }
+};
+
+const resolvePrices = (raw) => {
+  const mrp = toNum(raw.mrp);
+  const offerPrice = isBlank(raw.offerPrice) ? mrp : Number(raw.offerPrice);
+  return { mrp, offerPrice };
 };
 
 const buildSizeVariant = (raw, errors, path) => {
+  if (!hasAttribute(raw)) {
+    errors.push({
+      field: `${path}.size`,
+      message: "Enter at least one of Size, Weight or Height",
+    });
+  }
   validatePricing(raw, errors, path);
   return {
-    size: raw.size ?? null,
-    weight: raw.weight ?? null,
-    height: raw.height ?? null,
-    mrp: raw.mrp !== undefined ? Number(raw.mrp) : undefined,
-    offerPrice: raw.offerPrice !== undefined ? Number(raw.offerPrice) : undefined,
+    size: raw.size || null,
+    weight: raw.weight || null,
+    height: raw.height || null,
+    ...resolvePrices(raw),
     ...buildStock(raw),
-    sku: raw.sku ?? null,
+    sku: raw.sku || null,
     isActive: raw.isActive ?? true,
     packagingDetails: buildPackaging(raw.packagingDetails),
   };
 };
 
+// Color variant: size options optional
 const buildColorVariant = (raw, errors, path) => {
-  if (!raw.color) {
-    errors.push({ field: `${path}.color`, message: "Color is required" });
+  if (!raw.color || !String(raw.color).trim()) {
+    errors.push({ field: `${path}.color`, message: "Color name is required" });
   }
 
-  // ---------- FIX: stray empty sizeVariant row gulo age filter kore felo ----------
-  const rawSizeVariants = (Array.isArray(raw.sizeVariants) ? raw.sizeVariants : []).filter(
-    (sv) => !isEmptySizeVariant(sv),
-  );
-  const hasSizeVariants = rawSizeVariants.length > 0;
+  const rawSizeVariants = (
+    Array.isArray(raw.sizeVariants) ? raw.sizeVariants : []
+  ).filter((sv) => !isEmptySizeVariant(sv));
 
   const base = {
-    color: raw.color ?? null,
+    color: raw.color ? String(raw.color).trim() : null,
     images: Array.isArray(raw.images) ? raw.images : [],
     isActive: raw.isActive ?? true,
     packagingDetails: buildPackaging(raw.packagingDetails),
     sizeVariants: [],
   };
 
-  if (hasSizeVariants) {
+  if (rawSizeVariants.length > 0) {
+    // color + size options: price/stock size-row e thakbe
     base.sizeVariants = rawSizeVariants.map((sv, idx) =>
       buildSizeVariant(sv, errors, `${path}.sizeVariants[${idx}]`),
     );
-    base.mrp = undefined;
-    base.offerPrice = undefined;
+    base.mrp = null;
+    base.offerPrice = null;
     base.openingStock = 0;
     base.currentStock = 0;
   } else {
+    // color-only: size/weight/height lagbe na
     validatePricing(raw, errors, path);
-    base.mrp = raw.mrp !== undefined ? Number(raw.mrp) : undefined;
-    base.offerPrice = raw.offerPrice !== undefined ? Number(raw.offerPrice) : undefined;
-    Object.assign(base, buildStock(raw));
-    base.sku = raw.sku ?? null;
+    Object.assign(base, resolvePrices(raw), buildStock(raw));
+    base.sku = raw.sku || null;
   }
 
   return base;
 };
 
+// req.files theke main image ar per-color image count
+const countUploads = (files) => {
+  const list = Array.isArray(files) ? files : Object.values(files || {}).flat();
+  let main = 0;
+  const variant = {};
+  list.forEach((f) => {
+    const name = f?.fieldname || "";
+    if (/^variantImage_\d+$/.test(name)) {
+      const i = Number(name.split("_")[1]);
+      variant[i] = (variant[i] || 0) + 1;
+    } else {
+      main += 1;
+    }
+  });
+  return { main, variant };
+};
+
 /**
- * body: raw req.body (variants field already JSON.parse kora thakte hobe controller e)
+ * body: req.body (variants controller e JSON.parse kora thakte hobe)
+ * options.files: req.files
+ * options.existingMainImages: update-er somoy already thaka main image URL list
  * returns: { errors, data, hasVariants, hasColor }
  */
-const validateProduct = (body) => {
+const validateProduct = (body, { files = [], existingMainImages = [] } = {}) => {
   const errors = [];
   const data = {};
 
-  // ---------- FIX: shobar age stray empty top-level variant row gulo filter kora ----------
-  const allRawVariants = Array.isArray(body.variants) ? body.variants : [];
-  const rawVariants = allRawVariants.filter((v) => {
-    if (!v) return false;
-    // color-object hole color-emptiness check, na hole size-emptiness check
-    if (Object.prototype.hasOwnProperty.call(v, "color") || Array.isArray(v.sizeVariants)) {
-      return !isEmptyColorVariant(v);
-    }
-    return !isEmptySizeVariant(v);
-  });
+  const allRaw = Array.isArray(body.variants) ? body.variants.filter(Boolean) : [];
+
+  // Frontend explicit flag pathay; na thakle variants dekhe bujhe nei
+  const hasColor = !isBlank(body.hasColor)
+    ? String(body.hasColor) === "true"
+    : allRaw.some((v) => v.color);
+
+  const rawVariants = hasColor
+    ? allRaw // color mode: index preserve korte hobe (variantImage_<idx> er jonno)
+    : allRaw.filter((v) => !isEmptySizeVariant(v));
 
   const hasVariants = rawVariants.length > 0;
-  const hasColor = hasVariants && rawVariants.some((v) => v && v.color);
+  const uploads = countUploads(files);
 
-  if (!hasVariants) {
-    // ---------- Simple product (variant thakleo shob khali chilo, tai simple hisebe treat) ----------
-    validatePricing(body, errors, "");
-    data.mrp = body.mrp !== undefined ? Number(body.mrp) : undefined;
-    data.offerPrice = body.offerPrice !== undefined ? Number(body.offerPrice) : undefined;
-    Object.assign(data, buildStock(body));
-    data.packagingDetails = buildPackaging(body.packagingDetails);
-    data.variants = [];
-  } else if (hasColor) {
-    const invalidIdx = rawVariants.findIndex((v) => !v.color);
-    if (invalidIdx !== -1) {
-      errors.push({
-        field: `variants[${invalidIdx}].color`,
-        message: "All variants must have a color when color variants are used",
-      });
+  // ---------- IMAGE RULES ----------
+  if (!hasColor) {
+    if (existingMainImages.length + uploads.main === 0) {
+      errors.push({ field: "images", message: "At least one product image is required" });
     }
+  }
+
+  if (hasColor) {
+    if (!hasVariants) {
+      errors.push({ field: "variants", message: "At least one color is required" });
+    }
+    data.variants = rawVariants.map((v, idx) => {
+      const built = buildColorVariant(v, errors, `variants[${idx}]`);
+      const imgCount = built.images.length + (uploads.variant[idx] || 0);
+      if (imgCount === 0) {
+        errors.push({
+          field: `variants[${idx}].images`,
+          message: `Color ${idx + 1}: at least one image is required`,
+        });
+      }
+      return built;
+    });
+    data.mrp = null;
+    data.offerPrice = null;
+    data.openingStock = 0;
+    data.currentStock = 0;
+    data.packagingDetails = buildPackaging(body.packagingDetails);
+  } else if (hasVariants) {
+    // normal size/weight/height variants
     data.variants = rawVariants.map((v, idx) =>
-      buildColorVariant(v, errors, `variants[${idx}]`),
+      buildSizeVariant(v, errors, `variants[${idx}]`),
     );
-    data.mrp = undefined;
-    data.offerPrice = undefined;
+    data.mrp = null;
+    data.offerPrice = null;
     data.openingStock = 0;
     data.currentStock = 0;
     data.packagingDetails = buildPackaging(body.packagingDetails);
   } else {
-    data.variants = rawVariants.map((v, idx) =>
-      buildSizeVariant(v, errors, `variants[${idx}]`),
-    );
-    data.mrp = undefined;
-    data.offerPrice = undefined;
-    data.openingStock = 0;
-    data.currentStock = 0;
+    // simple product
+    validatePricing(body, errors, "");
+    Object.assign(data, resolvePrices(body), buildStock(body));
     data.packagingDetails = buildPackaging(body.packagingDetails);
+    data.variants = [];
   }
 
   return { errors, data, hasVariants, hasColor };

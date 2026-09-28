@@ -12,6 +12,14 @@ const packagingDetailsSchema = new mongoose.Schema(
   { _id: false },
 );
 
+const offerPriceValidator = {
+  validator: function (value) {
+    if (value === undefined || value === null) return true;
+    return this.mrp === undefined || this.mrp === null || value <= this.mrp;
+  },
+  message: "Offer price cannot be greater than MRP",
+};
+
 // nested size/weight/height row inside a color variant
 const sizeVariantSchema = new mongoose.Schema(
   {
@@ -23,16 +31,11 @@ const sizeVariantSchema = new mongoose.Schema(
       required: [true, "MRP is required"],
       min: [0, "MRP must be >= 0"],
     },
+    // optional: na dile controller/validator mrp set kore dey
     offerPrice: {
       type: Number,
-      required: [true, "Offer price is required"],
       min: [0, "Offer price must be >= 0"],
-      validate: {
-        validator: function (value) {
-          return this.mrp === undefined || value <= this.mrp;
-        },
-        message: "Offer price cannot be greater than MRP",
-      },
+      validate: offerPriceValidator,
     },
     openingStock: { type: Number, default: 0, min: 0 },
     currentStock: { type: Number, default: 0, min: 0 },
@@ -43,7 +46,7 @@ const sizeVariantSchema = new mongoose.Schema(
   { timestamps: false },
 );
 
-// top-level variant: either flat (size/weight/height) OR color (optionally with nested sizeVariants)
+// top-level variant: flat (size/weight/height) OR color (optionally with nested sizeVariants)
 const variantSchema = new mongoose.Schema(
   {
     color: { type: String, trim: true },
@@ -64,16 +67,7 @@ const variantSchema = new mongoose.Schema(
     offerPrice: {
       type: Number,
       min: [0, "Offer price must be >= 0"],
-      required: function () {
-        return !this.sizeVariants || this.sizeVariants.length === 0;
-      },
-      validate: {
-        validator: function (value) {
-          if (value === undefined || value === null) return true;
-          return this.mrp === undefined || value <= this.mrp;
-        },
-        message: "Offer price cannot be greater than MRP",
-      },
+      validate: offerPriceValidator,
     },
 
     openingStock: { type: Number, default: 0, min: 0 },
@@ -82,7 +76,6 @@ const variantSchema = new mongoose.Schema(
     isActive: { type: Boolean, default: true },
     packagingDetails: packagingDetailsSchema,
 
-    // present only when hasColor + per-size pricing under this color
     sizeVariants: { type: [sizeVariantSchema], default: [] },
   },
   { timestamps: false },
