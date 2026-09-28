@@ -1,0 +1,18 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title><%= store.storeName %></title>
+    <meta property="og:title" content="<%= store.storeName %>" />
+    <meta property="og:description" content="Open <%= store.storeName %> in the Eshop app" />
+    <% if (store.images && store.images[0]) { %>
+    <meta property="og:image" content="<%= store.images[0] %>" />
+    <% } %>
+  </head>
+  <body style="font-family:sans-serif;text-align:center;padding:40px">
+    <h2><%= store.storeName %></h2>
+    <p><%= store.storeType %></p>
+    <p style="color:#666">Open this link on a phone with the Eshop app installed.</p>
+  </body>
+</html>

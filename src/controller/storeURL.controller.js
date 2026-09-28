@@ -1,4 +1,3 @@
-const mongoose = require("mongoose");
 const StoreModel = require("../model/store.model.js");
 
 const getStoreByUniqueId = async (req, res) => {
@@ -14,13 +13,23 @@ const getStoreByUniqueId = async (req, res) => {
 
     const store = await StoreModel.findOne({
       storeUniqueId: storeUniqueId.trim(),
-    }).lean();
+    })
+      // sensitive field (email, userId, fcmTokens) bad, shudhu public data
+      .select("storeUniqueId storeName storeType images isActive isVerify")
+      .lean();
 
     if (!store) {
       return res.status(404).json({
         success: false,
         message: "Store not found",
       });
+    }
+
+    // Browser hole HTML, app/API call hole JSON
+    const wantsHtml = (req.headers.accept || "").includes("text/html");
+
+    if (wantsHtml) {
+      return res.render("store-fallback", { store });
     }
 
     return res.status(200).json({
@@ -37,6 +46,4 @@ const getStoreByUniqueId = async (req, res) => {
   }
 };
 
-module.exports = {
-  getStoreByUniqueId,
-};
+module.exports = { getStoreByUniqueId };

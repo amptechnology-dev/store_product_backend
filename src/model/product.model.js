@@ -39,6 +39,7 @@ const sizeVariantSchema = new mongoose.Schema(
     },
     openingStock: { type: Number, default: 0, min: 0 },
     currentStock: { type: Number, default: 0, min: 0 },
+    lowStockThreshold: { type: Number, default: 0, min: 0 },
     sku: { type: String, trim: true },
     isActive: { type: Boolean, default: true },
     packagingDetails: packagingDetailsSchema,
@@ -72,6 +73,7 @@ const variantSchema = new mongoose.Schema(
 
     openingStock: { type: Number, default: 0, min: 0 },
     currentStock: { type: Number, default: 0, min: 0 },
+    lowStockThreshold: { type: Number, default: 0, min: 0 },
     sku: { type: String, trim: true },
     isActive: { type: Boolean, default: true },
     packagingDetails: packagingDetailsSchema,
@@ -102,9 +104,17 @@ const reviewSchema = new mongoose.Schema(
 
 const productSchema = new mongoose.Schema(
   {
-    name: { type: String, required: [true, "Product name is required"], trim: true },
+    name: {
+      type: String,
+      required: [true, "Product name is required"],
+      trim: true,
+    },
     productCode: { type: String, unique: true },
-    description: { type: String, required: [true, "Product description is required"], trim: true },
+    description: {
+      type: String,
+      required: [true, "Product description is required"],
+      trim: true,
+    },
     unit: { type: String, required: [true, "Unit is required"], trim: true },
     deliveryTime: { type: String, trim: true },
 
@@ -115,6 +125,8 @@ const productSchema = new mongoose.Schema(
     offerPrice: { type: Number, min: [0, "Offer price must be >= 0"] },
     openingStock: { type: Number, default: 0, min: 0 },
     currentStock: { type: Number, default: 0, min: 0 },
+    lowStockThreshold: { type: Number, default: 0, min: 0 },
+    hasLowStock: { type: Boolean, default: false, index: true },
     packagingDetails: packagingDetailsSchema,
 
     variants: { type: [variantSchema], default: [] },
@@ -125,9 +137,21 @@ const productSchema = new mongoose.Schema(
 
     isActive: { type: Boolean, default: true },
     isVerified: { type: Boolean, default: false },
-    storeId: { type: mongoose.Schema.Types.ObjectId, ref: "Store", required: true },
-    categoryId: { type: mongoose.Schema.Types.ObjectId, ref: "Category", required: true },
-    userId: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true },
+    storeId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Store",
+      required: true,
+    },
+    categoryId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Category",
+      required: true,
+    },
+    userId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+      required: true,
+    },
 
     reviews: [reviewSchema],
     averageRating: { type: Number, default: 0, min: 0, max: 5 },

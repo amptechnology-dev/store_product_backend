@@ -21,6 +21,26 @@ app.use(cookieParser());
 
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
+
+app.get("/.well-known/assetlinks.json", (req, res) => {
+  const fingerprints = (process.env.APP_SHA256_FINGERPRINTS || "")
+    .split(",")
+    .map((f) => f.trim())
+    .filter(Boolean);
+
+  res.set("Content-Type", "application/json");
+  res.json([
+    {
+      relation: ["delegate_permission/common.handle_all_urls"],
+      target: {
+        namespace: "android_app",
+        package_name: process.env.ANDROID_PACKAGE_NAME, 
+        sha256_cert_fingerprints: fingerprints,
+      },
+    },
+  ]);
+});
+
 app.use(express.static(path.join(__dirname, "public")));
 
 app.set("view engine", "ejs");
@@ -44,6 +64,7 @@ const productreviewRoutes = require("./src/routes/productReview.route.js");
 const notificationRoutes = require("./src/routes/notification.route.js");
 const storeSettingRoutes = require("./src/routes/storeSetting.routes.js");
 const workerRoutes = require("./src/routes/worker.routes.js");
+const stockRoutes = require("./src/routes/stock.routes.js");
 
 app.use("/api/register", registerRoutes);
 app.use("/api/login", loginRoutes);
@@ -63,6 +84,7 @@ app.use("/api/product", productreviewRoutes);
 app.use("/api/notifications",notificationRoutes);
 app.use("/api/store-settings", storeSettingRoutes);
 app.use("/api/worker", workerRoutes);
+app.use("/api/stock", stockRoutes);
 
 const port = process.env.PORT || 8090;
 

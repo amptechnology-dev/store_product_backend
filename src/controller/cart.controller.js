@@ -114,18 +114,25 @@ const serializeCart = async (cart) => {
 
     const liveProduct = productMap.get(String(item.productId));
     const liveSource = liveProduct ? resolveLineSource(liveProduct, item.variantId) : null;
+
+    // ---------- ADD: stock 0 hole ba requested quantity-r cheye kom hole "unavailable" dhorbo ----------
+    const inStock = Boolean(liveSource && liveSource.stock > 0);
     const isAvailable = Boolean(
-      liveProduct?.isActive && liveProduct?.isVerified && liveSource && store?.isActive,
+      liveProduct?.isActive && liveProduct?.isVerified && liveSource && store?.isActive && inStock,
     );
 
     const mrp = isAvailable ? liveSource.mrp : item.mrp;
     const offerPrice = isAvailable ? liveSource.offerPrice : item.offerPrice;
-    const lineTotal = round2(offerPrice * item.quantity);
+
+    // ---------- ADD: quantity available stock-er cheye beshi hole cap kore dao (UI-te dekhabar jonno) ----------
+    const cappedQuantity =
+      isAvailable && liveSource.stock < item.quantity ? liveSource.stock : item.quantity;
+    const lineTotal = round2(offerPrice * cappedQuantity);
 
     for (const s of [group.summary, overall]) {
       if (isAvailable) {
-        s.totalItems += item.quantity;
-        s.totalMrp += mrp * item.quantity;
+        s.totalItems += cappedQuantity;
+        s.totalMrp += mrp * cappedQuantity;
         s.totalAmount += lineTotal;
       } else {
         s.hasUnavailableItems = true;
@@ -150,7 +157,9 @@ const serializeCart = async (cart) => {
       lineTotal,
       isAvailable,
       priceChanged: isAvailable && liveSource.offerPrice !== item.offerPrice,
-      stock: isAvailable ? liveSource.stock : undefined,
+      stock: isAvailable ? liveSource.stock : 0,
+      // ---------- ADD: frontend-ke bole dao je requested quantity stock-er cheye beshi ----------
+      quantityExceedsStock: isAvailable && liveSource.stock < item.quantity,
     });
   }
 
@@ -192,6 +201,11 @@ const addToCart = async (req, res) => {
       });
     }
 
+    // ---------- ADD: stock check (soft — cart-e reserve hoy na, shudhu available check) ----------
+    if (source.stock <= 0) {
+      return res.status(400).json({ success: false, message: "This item is out of stock" });
+    }
+
     const store = await StoreModel.findOne({ _id: product.storeId, isActive: true })
       .select("storeName")
       .lean();
@@ -213,10 +227,22 @@ const addToCart = async (req, res) => {
     );
 
     const newQuantity = (existing?.quantity ?? 0) + quantity;
+
     if (newQuantity > MAX_ITEM_QUANTITY) {
       return res.status(400).json({
         success: false,
         message: `You can add at most ${MAX_ITEM_QUANTITY} units of a single item`,
+      });
+    }
+
+    // ---------- ADD: available stock-er cheye beshi cart-e rakhte deবো na ----------
+    if (newQuantity > source.stock) {
+      return res.status(400).json({
+        success: false,
+        message:
+          source.stock > 0
+            ? `Only ${source.stock} unit(s) left in stock`
+            : "This item is out of stock",
       });
     }
 
@@ -294,6 +320,17 @@ const updateCartItem = async (req, res) => {
       return res.status(400).json({
         success: false,
         message: "This product is no longer available. Please remove it from your cart.",
+      });
+    }
+
+    // ---------- ADD: stock check ----------
+    if (quantity > source.stock) {
+      return res.status(400).json({
+        success: false,
+        message:
+          source.stock > 0
+            ? `Only ${source.stock} unit(s) left in stock`
+            : "This item is out of stock",
       });
     }
 

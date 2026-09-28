@@ -13,7 +13,11 @@ const buildPackaging = (input = {}) => ({
 
 const buildStock = (input = {}) => {
   const openingStock = Number(input.openingStock ?? 0);
-  return { openingStock, currentStock: openingStock };
+  return {
+    openingStock,
+    currentStock: openingStock,
+    lowStockThreshold: Number(input.lowStockThreshold ?? 0), 
+  };
 };
 
 const hasAttribute = (raw = {}) => !!(raw.size || raw.weight || raw.height);
@@ -28,7 +32,10 @@ const validatePricing = (raw, errors, path) => {
   if (isBlank(raw.mrp)) {
     errors.push({ field: `${prefix}mrp`, message: "MRP is required" });
   } else if (Number.isNaN(Number(raw.mrp)) || Number(raw.mrp) < 0) {
-    errors.push({ field: `${prefix}mrp`, message: "MRP must be a valid number >= 0" });
+    errors.push({
+      field: `${prefix}mrp`,
+      message: "MRP must be a valid number >= 0",
+    });
   }
   if (!isBlank(raw.offerPrice) && !isBlank(raw.mrp)) {
     if (Number(raw.offerPrice) > Number(raw.mrp)) {
@@ -93,6 +100,7 @@ const buildColorVariant = (raw, errors, path) => {
     base.offerPrice = null;
     base.openingStock = 0;
     base.currentStock = 0;
+    base.lowStockThreshold = 0;
   } else {
     // color-only: size/weight/height lagbe na
     validatePricing(raw, errors, path);
@@ -126,11 +134,16 @@ const countUploads = (files) => {
  * options.existingMainImages: update-er somoy already thaka main image URL list
  * returns: { errors, data, hasVariants, hasColor }
  */
-const validateProduct = (body, { files = [], existingMainImages = [] } = {}) => {
+const validateProduct = (
+  body,
+  { files = [], existingMainImages = [] } = {},
+) => {
   const errors = [];
   const data = {};
 
-  const allRaw = Array.isArray(body.variants) ? body.variants.filter(Boolean) : [];
+  const allRaw = Array.isArray(body.variants)
+    ? body.variants.filter(Boolean)
+    : [];
 
   // Frontend explicit flag pathay; na thakle variants dekhe bujhe nei
   const hasColor = !isBlank(body.hasColor)
@@ -147,13 +160,19 @@ const validateProduct = (body, { files = [], existingMainImages = [] } = {}) => 
   // ---------- IMAGE RULES ----------
   if (!hasColor) {
     if (existingMainImages.length + uploads.main === 0) {
-      errors.push({ field: "images", message: "At least one product image is required" });
+      errors.push({
+        field: "images",
+        message: "At least one product image is required",
+      });
     }
   }
 
   if (hasColor) {
     if (!hasVariants) {
-      errors.push({ field: "variants", message: "At least one color is required" });
+      errors.push({
+        field: "variants",
+        message: "At least one color is required",
+      });
     }
     data.variants = rawVariants.map((v, idx) => {
       const built = buildColorVariant(v, errors, `variants[${idx}]`);

@@ -14,8 +14,17 @@ const {
   uploadSimpleImages,
   uploadVariantImages,
 } = require("../helper/productImages.js");
+const {
+  flattenStockUnits,
+  computeLowStock,
+  logStockChange,
+  notifyLowStock,
+} = require("../helper/stockManager.js");
 
 // ---------- Reusable aggregation stage: flatten offerPrice from variants + nested sizeVariants ----------
+
+const escapeRegex = (str = "") => str.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
 const buildOfferPriceStages = () => [
   {
     $addFields: {
@@ -127,6 +136,27 @@ const createProduct = async (req, res) => {
         .json({ success: false, message: "Category not found for this store" });
     }
 
+    // ---------- Same store-e same name-er product age theke ache kina check ----------
+    const existingByName = await ProductModel.findOne({
+      name: {
+        $regex: `^${escapeRegex(parsedData.name.trim())}$`,
+        $options: "i",
+      },
+      storeId: parsedData.storeId,
+    });
+    if (existingByName) {
+      return res.status(400).json({
+        success: false,
+        message: "Validation failed",
+        errors: [
+          {
+            field: "name",
+            message: "Product name already exists in this store",
+          },
+        ],
+      });
+    }
+
     const { errors, data, hasVariants, hasColor } = validateProduct(body, {
       files: req.files,
     });
@@ -146,7 +176,14 @@ const createProduct = async (req, res) => {
       }));
     }
 
-    const product = await ProductModel.create({
+    // ---------- NOTE: currentStock always = openingStock at creation ----------
+    // validateProduct() helper-er buildStock() function ei kaj-ta already kore:
+    //   { openingStock, currentStock: openingStock, lowStockThreshold }
+    // -> simple product, size variant, color variant (with/without sizeVariants) — shob jaygay.
+    // Tai frontend theke currentStock alada pathanor dorkar nei; ekhane kono manual
+    // currentStock set korার dorkar nei, data.* theke already thik value ashবে.
+
+    const product = new ProductModel({
       name: parsedData.name,
       description: parsedData.description,
       unit: parsedData.unit,
@@ -159,6 +196,31 @@ const createProduct = async (req, res) => {
       hasStockManagement: true,
       ...data,
     });
+
+    const { hasLowStock: initialLowStock } = computeLowStock(product);
+    product.hasLowStock = initialLowStock;
+
+    await product.save();
+
+    // log opening stock for every stock unit (simple / variant / sizeVariant)
+    const openingUnits = flattenStockUnits(product);
+    await Promise.all(
+      openingUnits.map((u) =>
+        logStockChange({
+          productId: product._id,
+          storeId: product.storeId,
+          userId,
+          variantId: u.variantId,
+          sizeVariantId: u.sizeVariantId,
+          productName: product.name,
+          variantLabel: u.label,
+          type: "OPENING",
+          reason: "PRODUCT_CREATE",
+          previousStock: 0,
+          newStock: u.currentStock,
+        }),
+      ),
+    );
 
     return res.status(201).json({
       success: true,
@@ -379,18 +441,28 @@ const updateProduct = async (req, res) => {
 
     const parsedData = updateProductSchema.parse(body);
 
+    // ---------- FIX: sudhu tokhonই duplicate check koro jokhon name astually change hoyeche,
+    // ar shudhu SAME STORE-er moddhe check koro (onno store-er same-name product ke
+    // duplicate dhorবে na) ----------
     if (parsedData.name) {
-      const duplicate = await ProductModel.findOne({
-        name: { $regex: `^${parsedData.name}$`, $options: "i" },
-        userId,
-        _id: { $ne: id },
-      });
-      if (duplicate) {
-        return res.status(400).json({
-          success: false,
-          message: "Validation failed",
-          errors: [{ field: "name", message: "Product name already exists" }],
+      const trimmedName = parsedData.name.trim();
+      const nameChanged =
+        trimmedName.toLowerCase() !==
+        (existingProduct.name || "").trim().toLowerCase();
+
+      if (nameChanged) {
+        const duplicate = await ProductModel.findOne({
+          name: { $regex: `^${escapeRegex(trimmedName)}$`, $options: "i" },
+          storeId: existingProduct.storeId,
+          _id: { $ne: id },
         });
+        if (duplicate) {
+          return res.status(400).json({
+            success: false,
+            message: "Validation failed",
+            errors: [{ field: "name", message: "Product name already exists" }],
+          });
+        }
       }
     }
 
@@ -448,6 +520,9 @@ const updateProduct = async (req, res) => {
       }
 
       // ---------- Stock: delta logic, existing sold stock na hariye ----------
+      // NOTE: openingStock UI theke change korলে, oi delta currentStock-e apply hoy —
+      // currentStock kokhono direct frontend theke set hoy na, always
+      // applyOpeningStockDelta() diye calculate hoy.
       if (!hasVariants) {
         // simple product
         if (body.openingStock !== undefined) {
@@ -510,6 +585,11 @@ const updateProduct = async (req, res) => {
         hasVariants,
         hasColor,
       };
+
+      const tempForFlagCheck = { ...existingProduct.toObject(), ...updateData };
+      const { hasLowStock: computedLowStock } =
+        computeLowStock(tempForFlagCheck);
+      updateData.hasLowStock = computedLowStock;
     } else if (existingProduct.hasColor && req.files?.length) {
       // sudhu notun color-image add hocche, pricing/stock change hocche na
       const colorImageMap = await uploadVariantImages(req.files);
@@ -529,6 +609,43 @@ const updateProduct = async (req, res) => {
       { $set: updateData },
       { new: true, runValidators: true },
     );
+
+    // ---------- log stock deltas + notify if newly low ----------
+    if (isStructuralUpdate) {
+      const beforeUnits = flattenStockUnits(existingProduct);
+      const afterUnits = flattenStockUnits(updatedProduct);
+
+      const logPromises = afterUnits
+        .map((unit, idx) => {
+          const before = beforeUnits[idx];
+          if (!before || before.currentStock === unit.currentStock) return null;
+          return logStockChange({
+            productId: updatedProduct._id,
+            storeId: updatedProduct.storeId,
+            userId,
+            variantId: unit.variantId,
+            sizeVariantId: unit.sizeVariantId,
+            productName: updatedProduct.name,
+            variantLabel: unit.label,
+            type: unit.currentStock > before.currentStock ? "IN" : "OUT",
+            reason: "PRODUCT_UPDATE",
+            previousStock: before.currentStock,
+            newStock: unit.currentStock,
+          });
+        })
+        .filter(Boolean);
+      await Promise.all(logPromises);
+
+      if (updatedProduct.hasLowStock && !existingProduct.hasLowStock) {
+        const { lowUnits } = computeLowStock(updatedProduct);
+        await notifyLowStock({
+          product: updatedProduct,
+          lowUnits,
+          userId,
+          storeId: updatedProduct.storeId,
+        });
+      }
+    }
 
     return res.status(200).json({
       success: true,
@@ -720,8 +837,6 @@ const allProductWithStore = async (req, res) => {
 };
 
 // ...............Public controller for product................
-
-const escapeRegex = (str = "") => str.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
 const PUBLIC_STORE_FIELDS =
   "storeName storeType storeUniqueId images address lat long contactNo whatsappNo supportNo email description timingByDay isFeatured";
