@@ -1,4 +1,8 @@
-const { S3Client, PutObjectCommand, DeleteObjectCommand } = require("@aws-sdk/client-s3");
+const {
+  S3Client,
+  PutObjectCommand,
+  DeleteObjectCommand,
+} = require("@aws-sdk/client-s3");
 require("dotenv").config();
 
 const r2 = new S3Client({
@@ -10,13 +14,13 @@ const r2 = new S3Client({
   },
 });
 
-// 🔥 UPLOAD
 const uploadToR2 = async (fileBuffer, fileName, mimeType) => {
   const params = {
     Bucket: process.env.R2_BUCKET_NAME,
     Key: fileName,
     Body: fileBuffer,
     ContentType: mimeType,
+    CacheControl: "public, max-age=31536000, immutable",
   };
 
   await r2.send(new PutObjectCommand(params));
@@ -24,7 +28,6 @@ const uploadToR2 = async (fileBuffer, fileName, mimeType) => {
   return `${process.env.R2_PUBLIC_URL}/${fileName}`;
 };
 
-// 🗑️ DELETE
 const deleteFromR2 = async (fileName) => {
   const params = {
     Bucket: process.env.R2_BUCKET_NAME,

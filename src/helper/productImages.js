@@ -1,29 +1,40 @@
+const path = require("path");
 const { uploadToR2 } = require("./upload.js");
 
-// ---------- MAIN PRODUCT IMAGE ----------
-// Frontend theke fieldname "image0", "image1", "image2" ... erokom pathano hoy
-// Eta variant mode hok ba na hok, sob somoy call hobe controller theke.
+const sanitizeName = (name = "") =>
+  path
+    .basename(name, path.extname(name))
+    .replace(/[^a-zA-Z0-9_-]/g, "_")
+    .slice(0, 50);
+
+const buildFileName = (folder, file) => {
+  const ext = path.extname(file.originalname).toLowerCase();
+  const mediaFolder = file.mimetype.startsWith("video/") ? "videos" : "images";
+  return `${folder}/${mediaFolder}/${Date.now()}-${Math.round(
+    Math.random() * 1e9,
+  )}-${sanitizeName(file.originalname)}${ext}`;
+};
+
 const uploadSimpleImages = async (files = []) => {
   if (!files?.length) return [];
 
-  const imageFiles = files.filter((f) => /^image\d+$/.test(f.fieldname));
-  if (!imageFiles.length) return [];
+  const mediaFiles = files
+    .filter((f) => /^image\d+$/.test(f.fieldname))
+    // fieldname er number diye order thik rakhi
+    .sort(
+      (a, b) =>
+        Number(a.fieldname.replace("image", "")) -
+        Number(b.fieldname.replace("image", "")),
+    );
+  if (!mediaFiles.length) return [];
 
-  const uploaded = await Promise.all(
-    imageFiles.map((file) => {
-      const fileName = `products/${Date.now()}-${Math.round(
-        Math.random() * 1e9,
-      )}-${file.originalname}`;
-      return uploadToR2(file.buffer, fileName, file.mimetype);
-    }),
+  return Promise.all(
+    mediaFiles.map((file) =>
+      uploadToR2(file.buffer, buildFileName("products", file), file.mimetype),
+    ),
   );
-
-  return uploaded;
 };
 
-// ---------- VARIANT (COLOR) IMAGE ----------
-// Frontend theke fieldname "variantImage_0", "variantImage_1" ... erokom pathano hoy
-// (0, 1 = variant index). Return kore { "0": [url1, url2], "1": [url3] }
 const uploadVariantImages = async (files = []) => {
   if (!files?.length) return {};
 
@@ -32,21 +43,22 @@ const uploadVariantImages = async (files = []) => {
   );
   if (!variantFiles.length) return {};
 
-  const map = {};
-
-  await Promise.all(
+  const uploaded = await Promise.all(
     variantFiles.map(async (file) => {
-      const idx = file.fieldname.split("_")[1]; // "variantImage_2" -> "2"
-      const fileName = `products/variants/${Date.now()}-${Math.round(
-        Math.random() * 1e9,
-      )}-${file.originalname}`;
-      const url = await uploadToR2(file.buffer, fileName, file.mimetype);
-      if (!map[idx]) map[idx] = [];
-      map[idx].push(url);
+      const idx = file.fieldname.split("_")[1];
+      const url = await uploadToR2(
+        file.buffer,
+        buildFileName("products/variants", file),
+        file.mimetype,
+      );
+      return { idx, url };
     }),
   );
 
-  return map;
+  return uploaded.reduce((map, { idx, url }) => {
+    (map[idx] ||= []).push(url);
+    return map;
+  }, {});
 };
 
 module.exports = { uploadSimpleImages, uploadVariantImages };

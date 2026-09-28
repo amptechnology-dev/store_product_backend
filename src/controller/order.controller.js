@@ -18,8 +18,30 @@ const {
   findUnitStock,
 } = require("../helper/stockManager.js");
 
+// ===================== CONSTANTS / HELPERS =====================
+const ORDER_STATUSES = ["PENDING", "CONFIRMED", "SHIPPED", "DELIVERED", "CANCELLED"];
+
+// frontend er getNextStatuses er sathe mil rakho
+const ALLOWED_TRANSITIONS = {
+  PENDING: ["CONFIRMED", "CANCELLED"],
+  CONFIRMED: ["SHIPPED", "CANCELLED"],
+  SHIPPED: ["DELIVERED"],
+  DELIVERED: [],
+  CANCELLED: [],
+};
+
+const CUSTOMER_FIELDS = "name phone email";
+const MAX_LIMIT = 100;
+
 const getUserId = (req) => req.user?._id || req.user?.id;
 const round2 = (n) => Math.round((n + Number.EPSILON) * 100) / 100;
+const escapeRegex = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+const parsePagination = (query) => {
+  const pageNum = Math.max(parseInt(query.page) || 1, 1);
+  const limitNum = Math.min(Math.max(parseInt(query.limit) || 10, 1), MAX_LIMIT);
+  return { pageNum, limitNum };
+};
 
 const handleError = (res, error, label) => {
   if (error.name === "ZodError") {
@@ -36,10 +58,58 @@ const handleError = (res, error, label) => {
   return res.status(500).json({ success: false, message: "Internal server error" });
 };
 
+// Ei STORE-user er nijer shob store er id
+const getOwnedStoreIds = async (userId) => {
+  const stores = await StoreModel.find({ userId }).select("_id").lean();
+  return stores.map((s) => s._id);
+};
+
+const isStoreOwner = async (storeId, userId) =>
+  !!(await StoreModel.exists({ _id: storeId, userId }));
+
+// Atomic status change: sudhu valid "from" status thakle-i update hoy.
+// Concurrent request e ekta-i jitbe, tai stock double restore hobe na.
+const transitionOrder = async ({
+  orderId,
+  filter = {},
+  status,
+  note,
+  userId,
+  extra = {},
+  populateUser = false,
+}) => {
+  const validFrom = ORDER_STATUSES.filter((s) => ALLOWED_TRANSITIONS[s].includes(status));
+
+  let query = OrderModel.findOneAndUpdate(
+    { _id: orderId, ...filter, status: { $in: validFrom } },
+    {
+      $set: { status, ...extra },
+      $push: {
+        statusHistory: { status, changedBy: userId, note: note || null, at: new Date() },
+      },
+    },
+    { new: true },
+  );
+  if (populateUser) query = query.populate("userId", CUSTOMER_FIELDS);
+  return query.lean();
+};
+
+const rollbackLines = (lines) =>
+  Promise.all(
+    lines.map((l) =>
+      restoreStockForLine({
+        productId: l.productId,
+        variantId: l.variantId,
+        sizeVariantId: l.sizeVariantId,
+        quantity: l.quantity,
+      }),
+    ),
+  );
+
 // ===================== INTERNAL HELPER =====================
-// Ekta store-er ekta set-of-lines er jonno: stock atomically decrement kore,
-// order banay. Kono ekta line fail korলে ager shob successful decrement
-// rollback (restore) hoy — tai ekta store-er order "all or nothing".
+// Ekta store er ekta set-of-lines er jonno: stock atomically decrement kore,
+// order banay. Kono ekta line fail korle ager shob decrement rollback hoy —
+// tai ekta store er order "all or nothing".
 const attemptStoreCheckout = async ({
   userId,
   storeId,
@@ -79,18 +149,8 @@ const attemptStoreCheckout = async ({
     }
 
     const source = resolveLineSource(product, line.variantId);
-    if (!source) {
-      outOfStockLines.push({
-        productId: line.productId,
-        variantId: line.variantId,
-        name: product.name,
-        reason: "VARIANT_UNAVAILABLE",
-      });
-      continue;
-    }
-
-    const unit = locateStockUnit(product, line.variantId);
-    if (!unit) {
+    const unit = source ? locateStockUnit(product, line.variantId) : null;
+    if (!source || !unit) {
       outOfStockLines.push({
         productId: line.productId,
         variantId: line.variantId,
@@ -132,7 +192,6 @@ const attemptStoreCheckout = async ({
       newStock: findUnitStock(result.product, unit.variantId, unit.sizeVariantId),
     });
 
-    const lineTotal = round2(source.offerPrice * line.quantity);
     orderItems.push({
       productId: product._id,
       variantId: line.variantId ?? null,
@@ -147,26 +206,46 @@ const attemptStoreCheckout = async ({
       mrp: source.mrp,
       offerPrice: source.offerPrice,
       quantity: line.quantity,
-      lineTotal,
+      lineTotal: round2(source.offerPrice * line.quantity),
     });
   }
 
-  // ---------- kono line fail korলে shob decrement rollback ----------
+  // ---------- kono line fail korle shob decrement rollback ----------
   if (outOfStockLines.length > 0) {
-    await Promise.all(
-      decrementedLines.map((l) =>
-        restoreStockForLine({
-          productId: l.productId,
-          variantId: l.variantId,
-          sizeVariantId: l.sizeVariantId,
-          quantity: l.quantity,
-        }),
-      ),
-    );
+    await rollbackLines(decrementedLines);
     return { success: false, storeId, outOfStockLines };
   }
 
-  // ---------- log successful decrements as SALE ----------
+  const totalItems = orderItems.reduce((sum, i) => sum + i.quantity, 0);
+  const totalMrp = round2(orderItems.reduce((sum, i) => sum + i.mrp * i.quantity, 0));
+  const totalAmount = round2(orderItems.reduce((sum, i) => sum + i.lineTotal, 0));
+  const discount = round2(totalMrp - totalAmount);
+
+  // ---------- order create fail korle stock ferot dao ----------
+  let order;
+  try {
+    order = await OrderModel.create({
+      userId,
+      storeId,
+      storeName: store.storeName,
+      storeUniqueId: store.storeUniqueId,
+      items: orderItems,
+      totalItems,
+      totalMrp,
+      discount,
+      totalAmount,
+      deliveryAddress,
+      note,
+      paymentMethod,
+      status: "PENDING",
+      statusHistory: [{ status: "PENDING", changedBy: userId, at: new Date() }],
+    });
+  } catch (err) {
+    await rollbackLines(decrementedLines);
+    throw err;
+  }
+
+  // ---------- order confirm hoyeche, ekhon SALE log koro ----------
   await Promise.all(
     decrementedLines.map((l) =>
       logStockChange({
@@ -184,28 +263,6 @@ const attemptStoreCheckout = async ({
       }),
     ),
   );
-
-  const totalItems = orderItems.reduce((sum, i) => sum + i.quantity, 0);
-  const totalMrp = round2(orderItems.reduce((sum, i) => sum + i.mrp * i.quantity, 0));
-  const totalAmount = round2(orderItems.reduce((sum, i) => sum + i.lineTotal, 0));
-  const discount = round2(totalMrp - totalAmount);
-
-  const order = await OrderModel.create({
-    userId,
-    storeId,
-    storeName: store.storeName,
-    storeUniqueId: store.storeUniqueId,
-    items: orderItems,
-    totalItems,
-    totalMrp,
-    discount,
-    totalAmount,
-    deliveryAddress,
-    note,
-    paymentMethod,
-    status: "PENDING",
-    statusHistory: [{ status: "PENDING", changedBy: userId, at: new Date() }],
-  });
 
   return { success: true, storeId, order };
 };
@@ -252,7 +309,6 @@ const restoreOrderStock = async (order, userId) => {
 
 // ===================== 1. CHECKOUT FROM CART (multi-store) =====================
 // POST /api/order/checkout
-// body: { cartId, storeIds?, deliveryAddress, note?, paymentMethod }
 const checkout = async (req, res) => {
   try {
     const userId = getUserId(req);
@@ -271,10 +327,7 @@ const checkout = async (req, res) => {
     }
 
     if (items.length === 0) {
-      return res.status(400).json({
-        success: false,
-        message: "No items to checkout",
-      });
+      return res.status(400).json({ success: false, message: "No items to checkout" });
     }
 
     // ---------- store wise group ----------
@@ -295,28 +348,34 @@ const checkout = async (req, res) => {
 
     // ---------- protyek store independently checkout hoy ----------
     for (const [storeId, lines] of groups.entries()) {
-      const result = await attemptStoreCheckout({
-        userId,
-        storeId,
-        lines,
-        deliveryAddress,
-        note,
-        paymentMethod,
-      });
-
-      if (result.success) {
-        createdOrders.push(result.order);
-        successfulStoreIds.push(storeId);
-      } else {
-        failedStores.push({
+      try {
+        const result = await attemptStoreCheckout({
+          userId,
           storeId,
-          message: result.message,
-          outOfStockLines: result.outOfStockLines,
+          lines,
+          deliveryAddress,
+          note,
+          paymentMethod,
         });
+
+        if (result.success) {
+          createdOrders.push(result.order);
+          successfulStoreIds.push(storeId);
+        } else {
+          failedStores.push({
+            storeId,
+            message: result.message,
+            outOfStockLines: result.outOfStockLines,
+          });
+        }
+      } catch (err) {
+        // ekta store e unexpected error hole baki store der jeno atke na jay
+        console.error(`Checkout failed for store ${storeId}:`, err);
+        failedStores.push({ storeId, message: "Could not place order for this store" });
       }
     }
 
-    // ---------- successful store-er item-gulo cart theke remove koro ----------
+    // ---------- successful store er item gulo cart theke remove ----------
     if (successfulStoreIds.length > 0) {
       await CartModel.updateOne(
         { _id: cartId, userId },
@@ -354,7 +413,6 @@ const checkout = async (req, res) => {
 
 // ===================== 2. DIRECT "BUY NOW" CHECKOUT =====================
 // POST /api/order/buy-now
-// body: { productId, variantId?, quantity, deliveryAddress, note?, paymentMethod }
 const buyNow = async (req, res) => {
   try {
     const userId = getUserId(req);
@@ -382,7 +440,7 @@ const buyNow = async (req, res) => {
     if (!result.success) {
       return res.status(409).json({
         success: false,
-        message: "This item is out of stock",
+        message: result.message || "This item is out of stock",
         outOfStockLines: result.outOfStockLines,
       });
     }
@@ -402,17 +460,20 @@ const buyNow = async (req, res) => {
 const getMyOrders = async (req, res) => {
   try {
     const userId = getUserId(req);
-    const { status, page = 1, limit = 10 } = req.query;
+    const { status } = req.query;
+
+    if (status && !ORDER_STATUSES.includes(status)) {
+      return res.status(400).json({ success: false, message: "Invalid status" });
+    }
 
     const match = { userId };
     if (status) match.status = status;
 
-    const pageNum = Math.max(parseInt(page) || 1, 1);
-    const limitNum = Math.max(parseInt(limit) || 10, 1);
+    const { pageNum, limitNum } = parsePagination(req.query);
 
     const [orders, totalOrders] = await Promise.all([
       OrderModel.find(match)
-        .sort({ createdAt: -1 })
+        .sort({ createdAt: -1, _id: -1 })
         .skip((pageNum - 1) * limitNum)
         .limit(limitNum)
         .lean(),
@@ -439,6 +500,10 @@ const getMyOrdersByStore = async (req, res) => {
     const userId = getUserId(req);
     const { status } = req.query;
 
+    if (status && !ORDER_STATUSES.includes(status)) {
+      return res.status(400).json({ success: false, message: "Invalid status" });
+    }
+
     const match = { userId: new mongoose.Types.ObjectId(userId) };
     if (status) match.status = status;
 
@@ -451,10 +516,11 @@ const getMyOrdersByStore = async (req, res) => {
           storeName: { $first: "$storeName" },
           storeUniqueId: { $first: "$storeUniqueId" },
           totalOrders: { $sum: 1 },
+          latestOrderAt: { $max: "$createdAt" },
           orders: { $push: "$$ROOT" },
         },
       },
-      { $sort: { "orders.0.createdAt": -1 } },
+      { $sort: { latestOrderAt: -1 } },
     ]);
 
     return res.status(200).json({
@@ -506,31 +572,36 @@ const cancelMyOrder = async (req, res) => {
 
     const { reason } = cancelOrderSchema.parse(req.body);
 
-    const order = await OrderModel.findOne({ _id: orderId, userId });
-    if (!order) {
+    const existing = await OrderModel.findOne({ _id: orderId, userId }).select("status").lean();
+    if (!existing) {
       return res.status(404).json({ success: false, message: "Order not found" });
     }
 
-    if (["SHIPPED", "DELIVERED", "CANCELLED"].includes(order.status)) {
+    if (!ALLOWED_TRANSITIONS[existing.status].includes("CANCELLED")) {
       return res.status(400).json({
         success: false,
-        message: `Order cannot be cancelled once it is ${order.status}`,
+        message: `Order cannot be cancelled once it is ${existing.status}`,
+      });
+    }
+
+    // atomic claim: ekta request-i jitbe, tai stock ekbar-i restore hobe
+    const order = await transitionOrder({
+      orderId,
+      filter: { userId },
+      status: "CANCELLED",
+      note: reason,
+      userId,
+      extra: { cancelReason: reason || null, cancelledBy: "USER" },
+    });
+
+    if (!order) {
+      return res.status(409).json({
+        success: false,
+        message: "Order status has just changed, please refresh",
       });
     }
 
     await restoreOrderStock(order, userId);
-
-    order.status = "CANCELLED";
-    order.cancelReason = reason || null;
-    order.cancelledBy = "USER";
-    order.statusHistory.push({
-      status: "CANCELLED",
-      changedBy: userId,
-      note: reason || null,
-      at: new Date(),
-    });
-
-    await order.save();
 
     return res.status(200).json({
       success: true,
@@ -543,31 +614,60 @@ const cancelMyOrder = async (req, res) => {
 };
 
 // ===================== 7. STORE SIDE: GET STORE ORDERS =====================
-// GET /api/order/store-orders
+// GET /api/order/store-orders?page&limit&status&search&storeId
 const getStoreOrders = async (req, res) => {
   try {
     const userId = getUserId(req);
-    const { storeId, status, page = 1, limit = 10 } = req.query;
+    const { storeId, status } = req.query;
+    const search = typeof req.query.search === "string" ? req.query.search.trim() : "";
 
+    if (status && !ORDER_STATUSES.includes(status)) {
+      return res.status(400).json({ success: false, message: "Invalid status" });
+    }
+
+    // ---------- shudhu nijer store er order ----------
+    const ownedStoreIds = await getOwnedStoreIds(userId);
     const match = {};
+
     if (storeId) {
       if (!mongoose.isValidObjectId(storeId)) {
         return res.status(400).json({ success: false, message: "Invalid store id" });
       }
+      if (!ownedStoreIds.some((id) => String(id) === String(storeId))) {
+        return res.status(403).json({ success: false, message: "Not authorized for this store" });
+      }
       match.storeId = storeId;
     } else {
-      // storeId query-e na dile, ei STORE-user-er nijer shob store-er order dেখাও
-      const myStores = await StoreModel.find({ userId }).select("_id").lean();
-      match.storeId = { $in: myStores.map((s) => s._id) };
+      match.storeId = { $in: ownedStoreIds };
     }
+
     if (status) match.status = status;
 
-    const pageNum = Math.max(parseInt(page) || 1, 1);
-    const limitNum = Math.max(parseInt(limit) || 10, 1);
+    // ---------- search: order # / customer name, phone, email / delivery name, phone ----------
+    if (search) {
+      const rx = new RegExp(escapeRegex(search), "i");
+      const UserModel = mongoose.model("User");
+      const users = await UserModel.find({
+        $or: [{ name: rx }, { phone: rx }, { email: rx }],
+      })
+        .select("_id")
+        .limit(200)
+        .lean();
+
+      match.$or = [
+        { orderNumber: rx },
+        { "deliveryAddress.fullName": rx },
+        { "deliveryAddress.phone": rx },
+        ...(users.length ? [{ userId: { $in: users.map((u) => u._id) } }] : []),
+      ];
+    }
+
+    const { pageNum, limitNum } = parsePagination(req.query);
 
     const [orders, totalOrders] = await Promise.all([
       OrderModel.find(match)
-        .sort({ createdAt: -1 })
+        .populate("userId", CUSTOMER_FIELDS)
+        .sort({ createdAt: -1, _id: -1 })
         .skip((pageNum - 1) * limitNum)
         .limit(limitNum)
         .lean(),
@@ -598,14 +698,14 @@ const getStoreOrderById = async (req, res) => {
       return res.status(400).json({ success: false, message: "Invalid order id" });
     }
 
-    const order = await OrderModel.findById(orderId).lean();
+    const order = await OrderModel.findById(orderId)
+      .populate("userId", CUSTOMER_FIELDS)
+      .lean();
     if (!order) {
       return res.status(404).json({ success: false, message: "Order not found" });
     }
 
-    // ownership check: eta ki ei STORE-user-er nijer store-er order?
-    const store = await StoreModel.findOne({ _id: order.storeId, userId }).select("_id").lean();
-    if (!store) {
+    if (!(await isStoreOwner(order.storeId, userId))) {
       return res.status(403).json({ success: false, message: "Not authorized to view this order" });
     }
 
@@ -628,35 +728,55 @@ const updateOrderStatus = async (req, res) => {
 
     const { status, note } = updateOrderStatusSchema.parse(req.body);
 
-    const order = await OrderModel.findById(orderId);
-    if (!order) {
+    const existing = await OrderModel.findById(orderId).select("storeId status").lean();
+    if (!existing) {
       return res.status(404).json({ success: false, message: "Order not found" });
     }
 
-    // ownership check
-    const store = await StoreModel.findOne({ _id: order.storeId, userId }).select("_id").lean();
-    if (!store) {
-      return res.status(403).json({ success: false, message: "Not authorized to update this order" });
+    if (!(await isStoreOwner(existing.storeId, userId))) {
+      return res
+        .status(403)
+        .json({ success: false, message: "Not authorized to update this order" });
     }
 
-    if (order.status === "CANCELLED" || order.status === "DELIVERED") {
+    if (!ALLOWED_TRANSITIONS[existing.status].includes(status)) {
       return res.status(400).json({
         success: false,
-        message: `Order status cannot be changed once it is ${order.status}`,
+        message:
+          ALLOWED_TRANSITIONS[existing.status].length === 0
+            ? `Order status cannot be changed once it is ${existing.status}`
+            : `Cannot change status from ${existing.status} to ${status}`,
       });
     }
 
-    // ---------- store CANCELLED korলে stock restore koro ----------
+    const extra = {};
     if (status === "CANCELLED") {
-      await restoreOrderStock(order, userId);
-      order.cancelReason = note || null;
-      order.cancelledBy = "STORE";
+      extra.cancelReason = note || null;
+      extra.cancelledBy = "STORE";
+    }
+    if (status === "DELIVERED") {
+      extra.paymentStatus = "PAID"; // COD: delivery te taka pawa jay
     }
 
-    order.status = status;
-    order.statusHistory.push({ status, changedBy: userId, note: note || null, at: new Date() });
+    const order = await transitionOrder({
+      orderId,
+      status,
+      note,
+      userId,
+      extra,
+      populateUser: true, // frontend merge e customer jeno na hariye jay
+    });
 
-    await order.save();
+    if (!order) {
+      return res.status(409).json({
+        success: false,
+        message: "Order status has just changed, please refresh",
+      });
+    }
+
+    if (status === "CANCELLED") {
+      await restoreOrderStock(order, userId);
+    }
 
     return res.status(200).json({
       success: true,
