@@ -9,9 +9,7 @@ const storeSettingSchema = new mongoose.Schema(
       required: true,
       unique: true,
     },
-    hasVariants: { type: Boolean, default: false }, // size/weight/height wise variant on/off
-    hasColor: { type: Boolean, default: false }, // color wise variant + image on/off
-    hasStockManagement: { type: Boolean, default: false }, // stock field on/off
+    hasStockManagement: { type: Boolean, default: false },
   },
   { timestamps: true },
 );

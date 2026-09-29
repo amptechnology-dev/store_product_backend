@@ -3,7 +3,6 @@ const StoreSettingModel = require("../model/storeSetting.model.js");
 const { updateStoreSettingSchema } = require("../schema/storeSetting.schema.js");
 const { DEFAULT_SETTINGS } = require("../helper/storeSettings.js");
 
-
 const resolveStore = async (userId, storeId) => {
   if (storeId) return StoreModel.findOne({ _id: storeId, userId });
   return StoreModel.findOne({ userId });
@@ -22,13 +21,12 @@ const getStoreSettingsController = async (req, res) => {
     return res.status(200).json({
       success: true,
       storeId: store._id,
-      settings: settings
-        ? {
-            hasVariants: settings.hasVariants,
-            hasColor: settings.hasColor,
-            hasStockManagement: settings.hasStockManagement,
-          }
-        : DEFAULT_SETTINGS,
+      // [STOCK] shudhu hasStockManagement ferot dey
+      settings: {
+        hasStockManagement: settings
+          ? settings.hasStockManagement
+          : DEFAULT_SETTINGS.hasStockManagement,
+      },
     });
   } catch (error) {
     console.error("Get Store Settings Error:", error);
@@ -56,14 +54,17 @@ const updateStoreSettingsController = async (req, res) => {
     return res.status(200).json({
       success: true,
       message: "Store settings updated successfully",
-      settings,
+      settings: { hasStockManagement: settings.hasStockManagement },
     });
   } catch (error) {
     if (error.name === "ZodError") {
       return res.status(400).json({
         success: false,
         message: "Validation failed",
-        errors: error.issues.map((err) => ({ field: err.path.join("."), message: err.message })),
+        errors: error.issues.map((err) => ({
+          field: err.path.join("."),
+          message: err.message,
+        })),
       });
     }
     console.error("Update Store Settings Error:", error);

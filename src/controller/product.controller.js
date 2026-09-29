@@ -20,11 +20,31 @@ const {
   logStockChange,
   notifyLowStock,
 } = require("../helper/stockManager.js");
-
-// ---------- Reusable aggregation stage: flatten offerPrice from variants + nested sizeVariants ----------
+// [STOCK] store setting / product flag helper
+const {
+  getStockManagementEnabled,
+  isStockManaged,
+} = require("../helper/storeSettings.js");
 
 const escapeRegex = (str = "") => str.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
+// [STOCK] stock management off hole stock field gulo shob level e 0 thakbe
+const zeroStock = (obj) => {
+  obj.openingStock = 0;
+  obj.currentStock = 0;
+  obj.lowStockThreshold = 0;
+};
+
+// [STOCK] product + variant + sizeVariant, tin level e stock 0 kore dey
+const stripStockFields = (data) => {
+  zeroStock(data);
+  (data.variants || []).forEach((v) => {
+    zeroStock(v);
+    (v.sizeVariants || []).forEach(zeroStock);
+  });
+};
+
+// ---------- Reusable aggregation stage: flatten offerPrice from variants + nested sizeVariants ----------
 const buildOfferPriceStages = () => [
   {
     $addFields: {
@@ -166,6 +186,9 @@ const createProduct = async (req, res) => {
         .json({ success: false, message: "Validation failed", errors });
     }
 
+    // [STOCK] store settings e stock management on ache kina (product e snapshot hishebe save hobe)
+    const stockEnabled = await getStockManagementEnabled(parsedData.storeId);
+
     data.images = await uploadSimpleImages(req.files);
 
     if (hasColor) {
@@ -176,12 +199,8 @@ const createProduct = async (req, res) => {
       }));
     }
 
-    // ---------- NOTE: currentStock always = openingStock at creation ----------
-    // validateProduct() helper-er buildStock() function ei kaj-ta already kore:
-    //   { openingStock, currentStock: openingStock, lowStockThreshold }
-    // -> simple product, size variant, color variant (with/without sizeVariants) — shob jaygay.
-    // Tai frontend theke currentStock alada pathanor dorkar nei; ekhane kono manual
-    // currentStock set korার dorkar nei, data.* theke already thik value ashবে.
+    // [STOCK] stock off hole main product + shob variant + sizeVariant e stock 0
+    if (!stockEnabled) stripStockFields(data);
 
     const product = new ProductModel({
       name: parsedData.name,
@@ -193,34 +212,39 @@ const createProduct = async (req, res) => {
       isVerified: true,
       hasVariants,
       hasColor,
-      hasStockManagement: true,
       ...data,
+      // [STOCK] data er por rakhlam jate validateProduct er kono value eta override na kore
+      hasStockManagement: stockEnabled,
     });
 
-    const { hasLowStock: initialLowStock } = computeLowStock(product);
-    product.hasLowStock = initialLowStock;
+    // [STOCK] stock off hole low stock flag shobshomoy false
+    product.hasLowStock = stockEnabled
+      ? computeLowStock(product).hasLowStock
+      : false;
 
     await product.save();
 
-    // log opening stock for every stock unit (simple / variant / sizeVariant)
-    const openingUnits = flattenStockUnits(product);
-    await Promise.all(
-      openingUnits.map((u) =>
-        logStockChange({
-          productId: product._id,
-          storeId: product.storeId,
-          userId,
-          variantId: u.variantId,
-          sizeVariantId: u.sizeVariantId,
-          productName: product.name,
-          variantLabel: u.label,
-          type: "OPENING",
-          reason: "PRODUCT_CREATE",
-          previousStock: 0,
-          newStock: u.currentStock,
-        }),
-      ),
-    );
+    // [STOCK] opening stock log shudhu stock managed product er jonno
+    if (stockEnabled) {
+      const openingUnits = flattenStockUnits(product);
+      await Promise.all(
+        openingUnits.map((u) =>
+          logStockChange({
+            productId: product._id,
+            storeId: product.storeId,
+            userId,
+            variantId: u.variantId,
+            sizeVariantId: u.sizeVariantId,
+            productName: product.name,
+            variantLabel: u.label,
+            type: "OPENING",
+            reason: "PRODUCT_CREATE",
+            previousStock: 0,
+            newStock: u.currentStock,
+          }),
+        ),
+      );
+    }
 
     return res.status(201).json({
       success: true,
@@ -253,6 +277,12 @@ const createProduct = async (req, res) => {
         success: false,
         message: "Product with this name already exists",
       });
+    }
+    // uploadPreparedFile er statusCode error (video convert fail etc.)
+    if (error.statusCode) {
+      return res
+        .status(error.statusCode)
+        .json({ success: false, message: error.message });
     }
     return res
       .status(500)
@@ -302,7 +332,6 @@ const getAllProducts = async (req, res) => {
       },
       { $unwind: { path: "$category", preserveNullAndEmptyArrays: true } },
 
-      // ---------- FIX: minOfferPrice/maxOfferPrice ekhon nested sizeVariants o dekhe ----------
       ...buildOfferPriceStages(),
 
       {
@@ -419,6 +448,9 @@ const updateProduct = async (req, res) => {
         .json({ success: false, message: "Product not found" });
     }
 
+    // [STOCK] ei product e stock management on kina (product er nijer snapshot flag)
+    const stockManaged = isStockManaged(existingProduct);
+
     const body = { ...req.body };
     if (typeof body.variants === "string") {
       try {
@@ -441,9 +473,7 @@ const updateProduct = async (req, res) => {
 
     const parsedData = updateProductSchema.parse(body);
 
-    // ---------- FIX: sudhu tokhonই duplicate check koro jokhon name astually change hoyeche,
-    // ar shudhu SAME STORE-er moddhe check koro (onno store-er same-name product ke
-    // duplicate dhorবে na) ----------
+    // sudhu name change hole, ar SAME STORE-er moddhe duplicate check
     if (parsedData.name) {
       const trimmedName = parsedData.name.trim();
       const nameChanged =
@@ -519,11 +549,12 @@ const updateProduct = async (req, res) => {
         }));
       }
 
-      // ---------- Stock: delta logic, existing sold stock na hariye ----------
-      // NOTE: openingStock UI theke change korলে, oi delta currentStock-e apply hoy —
-      // currentStock kokhono direct frontend theke set hoy na, always
-      // applyOpeningStockDelta() diye calculate hoy.
-      if (!hasVariants) {
+      // ---------- Stock ----------
+      if (!stockManaged) {
+        // [STOCK] stock management off: main product + variant + sizeVariant e stock 0,
+        // frontend theke ja-i ashuk stock field save hobe na
+        stripStockFields(data);
+      } else if (!hasVariants) {
         // simple product
         if (body.openingStock !== undefined) {
           Object.assign(
@@ -586,10 +617,13 @@ const updateProduct = async (req, res) => {
         hasColor,
       };
 
-      const tempForFlagCheck = { ...existingProduct.toObject(), ...updateData };
-      const { hasLowStock: computedLowStock } =
-        computeLowStock(tempForFlagCheck);
-      updateData.hasLowStock = computedLowStock;
+      // [STOCK] low stock flag shudhu stock managed product er jonno
+      if (stockManaged) {
+        const tempForFlagCheck = { ...existingProduct.toObject(), ...updateData };
+        updateData.hasLowStock = computeLowStock(tempForFlagCheck).hasLowStock;
+      } else {
+        updateData.hasLowStock = false;
+      }
     } else if (existingProduct.hasColor && req.files?.length) {
       // sudhu notun color-image add hocche, pricing/stock change hocche na
       const colorImageMap = await uploadVariantImages(req.files);
@@ -604,6 +638,9 @@ const updateProduct = async (req, res) => {
       }
     }
 
+    // [STOCK] hasStockManagement snapshot create er por kokhono change hobe na
+    delete updateData.hasStockManagement;
+
     const updatedProduct = await ProductModel.findByIdAndUpdate(
       id,
       { $set: updateData },
@@ -611,7 +648,8 @@ const updateProduct = async (req, res) => {
     );
 
     // ---------- log stock deltas + notify if newly low ----------
-    if (isStructuralUpdate) {
+    // [STOCK] shudhu stock managed product er jonno
+    if (isStructuralUpdate && stockManaged) {
       const beforeUnits = flattenStockUnits(existingProduct);
       const afterUnits = flattenStockUnits(updatedProduct);
 
@@ -672,6 +710,12 @@ const updateProduct = async (req, res) => {
       return res
         .status(400)
         .json({ success: false, message: "Validation failed", errors });
+    }
+    // uploadPreparedFile er statusCode error (video convert fail etc.)
+    if (error.statusCode) {
+      return res
+        .status(error.statusCode)
+        .json({ success: false, message: error.message });
     }
     return res
       .status(500)
@@ -781,7 +825,6 @@ const allProductWithStore = async (req, res) => {
       },
       { $unwind: { path: "$category", preserveNullAndEmptyArrays: true } },
 
-      // ---------- FIX: minOfferPrice/maxOfferPrice ekhon nested sizeVariants o dekhe ----------
       ...buildOfferPriceStages(),
 
       {
@@ -900,18 +943,9 @@ const fetchStoreProducts = async (store, query, categoryId) => {
 
   const pipeline = [{ $match: match }];
 
-  // ---------- FIX: minOfferPrice ekhon nested sizeVariants soho calculate hoy, tai price-filter ekhon age na kore ei stage-er pore kora hocche ----------
   pipeline.push(...buildOfferPriceStages());
 
   if (minPrice !== null || maxPrice !== null) {
-    const priceRange = {};
-    if (minPrice !== null) priceRange.$gte = minPrice;
-    if (maxPrice !== null) priceRange.$lte = maxPrice;
-
-    const cmp = {};
-    if (minPrice !== null) cmp.$gte = ["$maxOfferPrice", minPrice];
-    if (maxPrice !== null) cmp.$lte = ["$minOfferPrice", maxPrice];
-
     pipeline.push({
       $match: {
         $expr:
@@ -1115,7 +1149,6 @@ const getStoreProducts = async (req, res) => {
       .populate({ path: "reviews.userId", select: "name picture" })
       .lean();
 
-    // ---------- FIX: flat helper to get offerPrice list for a product (color+sizeVariants soho) ----------
     const getOfferPrices = (p) => {
       const prices = [];
       (p.variants || []).forEach((v) => {

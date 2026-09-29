@@ -6,11 +6,15 @@ const bannerSchema = new mongoose.Schema(
       type: String,
       required: [true, "Banner name is required"],
       trim: true,
-      uppercase: true,
     },
     image: {
       type: String,
-      required: [true, "Banner image is required"],
+      required: [true, "Banner media is required"],
+    },
+    mediaType: {
+      type: String,
+      enum: ["image", "video"],
+      default: "image",
     },
     isActive: { type: Boolean, default: true },
     storeId: {
@@ -22,6 +26,15 @@ const bannerSchema = new mongoose.Schema(
       type: mongoose.Schema.Types.ObjectId,
       ref: "User",
       required: true,
+    },
+    bannerURL: {
+      type: String,
+      trim: true,
+      default: "",
+      match: [
+        /^https?:\/\/.+/i,
+        "Banner URL must start with http:// or https://",
+      ],
     },
   },
   { timestamps: true },

@@ -9,6 +9,8 @@ const {
   MAX_CART_LINES,
 } = require("../schema/cart.schema.js");
 const { resolveLineSource } = require("../helper/resolveVariant.js");
+// [STOCK] product er stock management flag check
+const { isStockManaged } = require("../helper/storeSettings.js");
 
 // ===================== HELPERS =====================
 
@@ -80,7 +82,10 @@ const serializeCart = async (cart) => {
 
   const [products, stores] = await Promise.all([
     ProductModel.find({ _id: { $in: productIds } })
-      .select("name productCode images unit variants mrp offerPrice currentStock isActive isVerified")
+      // [STOCK] hasStockManagement select e add kora hoyeche (lean e na thakle flag ashto na)
+      .select(
+        "name productCode images unit variants mrp offerPrice currentStock hasStockManagement isActive isVerified",
+      )
       .lean(),
     StoreModel.find({ _id: { $in: storeIds } })
       .select("storeName storeUniqueId images isActive")
@@ -113,20 +118,28 @@ const serializeCart = async (cart) => {
     const group = groups.get(storeKey);
 
     const liveProduct = productMap.get(String(item.productId));
-    const liveSource = liveProduct ? resolveLineSource(liveProduct, item.variantId) : null;
+    const liveSource = liveProduct
+      ? resolveLineSource(liveProduct, item.variantId)
+      : null;
 
-    // ---------- ADD: stock 0 hole ba requested quantity-r cheye kom hole "unavailable" dhorbo ----------
-    const inStock = Boolean(liveSource && liveSource.stock > 0);
+    // [STOCK] stock management off hole stock check hobe na
+    const trackStock = isStockManaged(liveProduct);
+    const inStock = !trackStock || Boolean(liveSource && liveSource.stock > 0);
     const isAvailable = Boolean(
-      liveProduct?.isActive && liveProduct?.isVerified && liveSource && store?.isActive && inStock,
+      liveProduct?.isActive &&
+        liveProduct?.isVerified &&
+        liveSource &&
+        store?.isActive &&
+        inStock,
     );
 
     const mrp = isAvailable ? liveSource.mrp : item.mrp;
     const offerPrice = isAvailable ? liveSource.offerPrice : item.offerPrice;
 
-    // ---------- ADD: quantity available stock-er cheye beshi hole cap kore dao (UI-te dekhabar jonno) ----------
-    const cappedQuantity =
-      isAvailable && liveSource.stock < item.quantity ? liveSource.stock : item.quantity;
+    // [STOCK] quantity cap shudhu stock managed product e
+    const exceedsStock =
+      isAvailable && trackStock && liveSource.stock < item.quantity;
+    const cappedQuantity = exceedsStock ? liveSource.stock : item.quantity;
     const lineTotal = round2(offerPrice * cappedQuantity);
 
     for (const s of [group.summary, overall]) {
@@ -157,9 +170,10 @@ const serializeCart = async (cart) => {
       lineTotal,
       isAvailable,
       priceChanged: isAvailable && liveSource.offerPrice !== item.offerPrice,
-      stock: isAvailable ? liveSource.stock : 0,
-      // ---------- ADD: frontend-ke bole dao je requested quantity stock-er cheye beshi ----------
-      quantityExceedsStock: isAvailable && liveSource.stock < item.quantity,
+      // [STOCK] stock managed na hole stock null, frontend stockManaged dekhbe
+      stock: !trackStock ? null : isAvailable ? liveSource.stock : 0,
+      stockManaged: trackStock,
+      quantityExceedsStock: exceedsStock,
     });
   }
 
@@ -187,12 +201,15 @@ const addToCart = async (req, res) => {
       isVerified: true,
     }).lean();
     if (!product) {
-      return res.status(404).json({ success: false, message: "Product not available" });
+      return res
+        .status(404)
+        .json({ success: false, message: "Product not available" });
     }
 
     const source = resolveLineSource(product, variantId);
     if (!source) {
-      const hasVariants = Array.isArray(product.variants) && product.variants.length > 0;
+      const hasVariants =
+        Array.isArray(product.variants) && product.variants.length > 0;
       return res.status(400).json({
         success: false,
         message: hasVariants
@@ -201,16 +218,25 @@ const addToCart = async (req, res) => {
       });
     }
 
-    // ---------- ADD: stock check (soft — cart-e reserve hoy na, shudhu available check) ----------
-    if (source.stock <= 0) {
-      return res.status(400).json({ success: false, message: "This item is out of stock" });
+    // [STOCK] stock check shudhu stock managed product e (cart e reserve hoy na)
+    const trackStock = isStockManaged(product);
+
+    if (trackStock && source.stock <= 0) {
+      return res
+        .status(400)
+        .json({ success: false, message: "This item is out of stock" });
     }
 
-    const store = await StoreModel.findOne({ _id: product.storeId, isActive: true })
+    const store = await StoreModel.findOne({
+      _id: product.storeId,
+      isActive: true,
+    })
       .select("storeName")
       .lean();
     if (!store) {
-      return res.status(400).json({ success: false, message: "Store is currently unavailable" });
+      return res
+        .status(400)
+        .json({ success: false, message: "Store is currently unavailable" });
     }
 
     const cart = await CartModel.findOneAndUpdate(
@@ -235,8 +261,8 @@ const addToCart = async (req, res) => {
       });
     }
 
-    // ---------- ADD: available stock-er cheye beshi cart-e rakhte deবো na ----------
-    if (newQuantity > source.stock) {
+    // [STOCK] available stock er cheye beshi cart e rakhte debo na (shudhu stock managed e)
+    if (trackStock && newQuantity > source.stock) {
       return res.status(400).json({
         success: false,
         message:
@@ -256,7 +282,11 @@ const addToCart = async (req, res) => {
     const snapshot = toSnapshot(product, source);
 
     if (existing) {
-      existing.set({ ...snapshot, storeName: store.storeName, quantity: newQuantity });
+      existing.set({
+        ...snapshot,
+        storeName: store.storeName,
+        quantity: newQuantity,
+      });
     } else {
       cart.items.push({
         productId: product._id,
@@ -284,7 +314,9 @@ const addToCart = async (req, res) => {
 const getCart = async (req, res) => {
   try {
     const cart = await CartModel.findOne({ userId: getUserId(req) });
-    return res.status(200).json({ success: true, cart: await serializeCart(cart) });
+    return res
+      .status(200)
+      .json({ success: true, cart: await serializeCart(cart) });
   } catch (error) {
     return handleError(res, error, "Get Cart Error");
   }
@@ -297,7 +329,9 @@ const updateCartItem = async (req, res) => {
     const { itemId } = req.params;
 
     if (!mongoose.isValidObjectId(itemId)) {
-      return res.status(400).json({ success: false, message: "Invalid item id" });
+      return res
+        .status(400)
+        .json({ success: false, message: "Invalid item id" });
     }
 
     const { quantity } = updateCartItemSchema.parse(req.body);
@@ -305,7 +339,9 @@ const updateCartItem = async (req, res) => {
     const cart = await CartModel.findOne({ userId });
     const item = cart?.items.id(itemId);
     if (!item) {
-      return res.status(404).json({ success: false, message: "Cart item not found" });
+      return res
+        .status(404)
+        .json({ success: false, message: "Cart item not found" });
     }
 
     const product = await ProductModel.findOne({
@@ -319,12 +355,13 @@ const updateCartItem = async (req, res) => {
     if (!source) {
       return res.status(400).json({
         success: false,
-        message: "This product is no longer available. Please remove it from your cart.",
+        message:
+          "This product is no longer available. Please remove it from your cart.",
       });
     }
 
-    // ---------- ADD: stock check ----------
-    if (quantity > source.stock) {
+    // [STOCK] stock check shudhu stock managed product e
+    if (isStockManaged(product) && quantity > source.stock) {
       return res.status(400).json({
         success: false,
         message:
@@ -353,7 +390,9 @@ const removeCartItem = async (req, res) => {
     const { itemId } = req.params;
 
     if (!mongoose.isValidObjectId(itemId)) {
-      return res.status(400).json({ success: false, message: "Invalid item id" });
+      return res
+        .status(400)
+        .json({ success: false, message: "Invalid item id" });
     }
 
     const cart = await CartModel.findOneAndUpdate(
@@ -378,7 +417,9 @@ const removeStoreItems = async (req, res) => {
     const { storeId } = req.params;
 
     if (!mongoose.isValidObjectId(storeId)) {
-      return res.status(400).json({ success: false, message: "Invalid store id" });
+      return res
+        .status(400)
+        .json({ success: false, message: "Invalid store id" });
     }
 
     const cart = await CartModel.findOneAndUpdate(
@@ -400,7 +441,10 @@ const removeStoreItems = async (req, res) => {
 // ===================== 6. CLEAR CART =====================
 const clearCart = async (req, res) => {
   try {
-    await CartModel.updateOne({ userId: getUserId(req) }, { $set: { items: [] } });
+    await CartModel.updateOne(
+      { userId: getUserId(req) },
+      { $set: { items: [] } },
+    );
     return res.status(200).json({ success: true, message: "Cart cleared" });
   } catch (error) {
     return handleError(res, error, "Clear Cart Error");

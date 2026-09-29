@@ -133,7 +133,9 @@ const productSchema = new mongoose.Schema(
 
     hasVariants: { type: Boolean, default: false },
     hasColor: { type: Boolean, default: false },
-    hasStockManagement: { type: Boolean, default: false },
+    // [STOCK] product create er somoy store setting theke snapshot hoy.
+    // default true: purono product (jader e field nei) age moto stock managed thakbe
+    hasStockManagement: { type: Boolean, default: true },
 
     isActive: { type: Boolean, default: true },
     isVerified: { type: Boolean, default: false },

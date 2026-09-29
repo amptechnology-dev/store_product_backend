@@ -17,7 +17,13 @@ const {
   logStockChange,
   findUnitStock,
 } = require("../helper/stockManager.js");
-const { notifyNewOrder } = require("../helper/notification.helper.js");
+const {
+  notifyNewOrder,
+  notifyOrderCancelled,
+  notifyUserOrderStatus,
+} = require("../helper/notification.helper.js");
+// [STOCK] product er stock management flag check
+const { isStockManaged } = require("../helper/storeSettings.js");
 
 // ===================== CONSTANTS / HELPERS =====================
 const ORDER_STATUSES = [
@@ -168,8 +174,7 @@ const attemptStoreCheckout = async ({
     }
 
     const source = resolveLineSource(product, line.variantId);
-    const unit = source ? locateStockUnit(product, line.variantId) : null;
-    if (!source || !unit) {
+    if (!source) {
       outOfStockLines.push({
         productId: line.productId,
         variantId: line.variantId,
@@ -179,42 +184,57 @@ const attemptStoreCheckout = async ({
       continue;
     }
 
-    const result = await decrementStockForLine({
-      productId: product._id,
-      variantId: unit.variantId,
-      sizeVariantId: unit.sizeVariantId,
-      quantity: line.quantity,
-    });
+    // [STOCK] stock management on hole-i stock check + minus hoy, nahole shudhu order hoy
+    if (isStockManaged(product)) {
+      const unit = locateStockUnit(product, line.variantId);
+      if (!unit) {
+        outOfStockLines.push({
+          productId: line.productId,
+          variantId: line.variantId,
+          name: product.name,
+          reason: "VARIANT_UNAVAILABLE",
+        });
+        continue;
+      }
 
-    if (!result.success) {
-      outOfStockLines.push({
-        productId: line.productId,
-        variantId: line.variantId,
-        name: product.name,
-        availableStock: unit.currentStock,
-        requestedQuantity: line.quantity,
-        reason: "INSUFFICIENT_STOCK",
+      const result = await decrementStockForLine({
+        productId: product._id,
+        variantId: unit.variantId,
+        sizeVariantId: unit.sizeVariantId,
+        quantity: line.quantity,
       });
-      continue;
-    }
 
-    decrementedLines.push({
-      productId: product._id,
-      storeId: product.storeId,
-      variantId: unit.variantId,
-      sizeVariantId: unit.sizeVariantId,
-      quantity: line.quantity,
-      productName: product.name,
-      variantLabel:
-        [source.color, source.size, source.weight, source.height]
-          .filter(Boolean)
-          .join(" / ") || "Default",
-      newStock: findUnitStock(
-        result.product,
-        unit.variantId,
-        unit.sizeVariantId,
-      ),
-    });
+      if (!result.success) {
+        outOfStockLines.push({
+          productId: line.productId,
+          variantId: line.variantId,
+          name: product.name,
+          availableStock: unit.currentStock,
+          requestedQuantity: line.quantity,
+          reason: "INSUFFICIENT_STOCK",
+        });
+        continue;
+      }
+
+      // [STOCK] rollback + SALE log shudhu stock managed line er jonno
+      decrementedLines.push({
+        productId: product._id,
+        storeId: product.storeId,
+        variantId: unit.variantId,
+        sizeVariantId: unit.sizeVariantId,
+        quantity: line.quantity,
+        productName: product.name,
+        variantLabel:
+          [source.color, source.size, source.weight, source.height]
+            .filter(Boolean)
+            .join(" / ") || "Default",
+        newStock: findUnitStock(
+          result.product,
+          unit.variantId,
+          unit.sizeVariantId,
+        ),
+      });
+    }
 
     orderItems.push({
       productId: product._id,
@@ -274,6 +294,7 @@ const attemptStoreCheckout = async ({
   }
 
   // ---------- order confirm hoyeche, ekhon SALE log koro ----------
+  // [STOCK] decrementedLines e shudhu stock managed line ache, tai off product skip hoy
   await Promise.all(
     decrementedLines.map((l) =>
       logStockChange({
@@ -299,10 +320,12 @@ const attemptStoreCheckout = async ({
 const restoreOrderStock = async (order, userId) => {
   await Promise.all(
     order.items.map(async (item) => {
+      // [STOCK] hasStockManagement select e add kora hoyeche
       const product = await ProductModel.findById(item.productId).select(
-        "variants",
+        "variants hasStockManagement",
       );
-      if (!product) return;
+      // [STOCK] product nei ba stock managed na hole restore korar kichu nei
+      if (!product || !isStockManaged(product)) return;
 
       const unit = locateStockUnit(product, item.variantId);
       if (!unit) return;
@@ -435,6 +458,7 @@ const checkout = async (req, res) => {
       );
     }
 
+    // (age ei check ta duibar chhilo, ekbar rakhlam)
     if (createdOrders.length === 0) {
       return res.status(409).json({
         success: false,
@@ -443,15 +467,9 @@ const checkout = async (req, res) => {
       });
     }
 
-    if (createdOrders.length === 0) {
-      return res.status(409).json({
-        success: false,
-        message: "Checkout failed for all stores",
-        failedStores,
-      });
-    }
     for (const order of createdOrders) {
       notifyNewOrder(order);
+      notifyUserOrderStatus(order);
     }
 
     return res.status(201).json({
@@ -511,6 +529,8 @@ const buyNow = async (req, res) => {
     }
 
     notifyNewOrder(result.order);
+
+    notifyUserOrderStatus(result.order);
 
     return res.status(201).json({
       success: true,
@@ -685,6 +705,8 @@ const cancelMyOrder = async (req, res) => {
       });
     }
 
+    notifyOrderCancelled(order);
+    notifyUserOrderStatus(order);
     await restoreOrderStock(order, userId);
 
     return res.status(200).json({
@@ -877,6 +899,8 @@ const updateOrderStatus = async (req, res) => {
         message: "Order status has just changed, please refresh",
       });
     }
+
+    notifyUserOrderStatus(order);
 
     if (status === "CANCELLED") {
       await restoreOrderStock(order, userId);
