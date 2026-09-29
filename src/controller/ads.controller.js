@@ -1,224 +1,150 @@
+const mongoose = require("mongoose");
 const AdsModel = require("../model/ads.model");
-const ProductModel = require("../model/product.model");
-const { uploadToR2 } = require("../helper/upload");
+const { uploadAdsMedia } = require("../helper/productImages");
 
-// CREATE ADS
+const handleError = (res, error, label) => {
+  console.error(label, error);
+  if (error.statusCode) {
+    return res
+      .status(error.statusCode)
+      .json({ success: false, message: error.message });
+  }
+  return res
+    .status(500)
+    .json({ success: false, message: "Internal server error" });
+};
 
+const parseBool = (v) => v === true || v === "true";
+
+// CREATE
 const createAds = async (req, res) => {
   try {
-    const { storeId, productId, rank, expiryDate } = req.body;
-
-    const product = await ProductModel.findById(productId);
-
-    if (!product) {
-      return res.status(404).json({
-        message: "Product not found",
-      });
+    const media = await uploadAdsMedia(req.files);
+    if (!media) {
+      return res
+        .status(400)
+        .json({ success: false, message: "Video file is required" });
     }
 
-    const ads = await AdsModel.create({
-      storeId,
-      productId,
-      rank: Number(rank),
-      expiryDate,
-    });
+    const ads = await AdsModel.create({ mediaUrl: media.url });
 
-    return res.status(201).json({
-      message: "Ads created successfully",
-      ads,
-    });
+    return res
+      .status(201)
+      .json({ success: true, message: "Ads created successfully", ads });
   } catch (error) {
-    console.error(error);
-
-    return res.status(500).json({
-      message: "Internal server error",
-    });
+    return handleError(res, error, "Create Ads Error:");
   }
 };
 
-// ALL ADS
-
+// ALL ADS (admin panel - active + inactive shob)
 const allAds = async (req, res) => {
   try {
-    const ads = await AdsModel.find({
-      isActive: true,
-      expiryDate: {
-        $gte: new Date(),
-      },
-    })
-      .populate({
-        path: "productId",
-        populate: {
-          path: "storeId",
-          select: "storeName",
-        },
-      })
-      .sort({
-        rank: 1,
-      });
-
-    return res.status(200).json({
-      total: ads.length,
-      ads,
-    });
+    const ads = await AdsModel.find().sort({ createdAt: -1 }).lean();
+    return res.status(200).json({ success: true, total: ads.length, ads });
   } catch (error) {
-    console.error(error);
-
-    return res.status(500).json({
-      message: "Internal server error",
-    });
+    return handleError(res, error, "All Ads Error:");
   }
 };
 
-// ADS BY RANK
-
-const adsByRank = async (req, res) => {
+// PUBLIC ADS (shudhu active ads, login lagbe na)
+const publicAds = async (req, res) => {
   try {
-    const { rank } = req.params;
-
-    const ads = await AdsModel.find({
-      rank: Number(rank),
-      isActive: true,
-      expiryDate: {
-        $gte: new Date(),
-      },
-    }).populate({
-      path: "productId",
-      populate: {
-        path: "storeId",
-        select: "storeName",
-      },
-    });
-
-    return res.status(200).json({
-      total: ads.length,
-      ads,
-    });
+    const ads = await AdsModel.find({ isActive: true })
+      .select("mediaUrl createdAt")
+      .sort({ createdAt: -1 })
+      .lean();
+    return res.status(200).json({ success: true, total: ads.length, ads });
   } catch (error) {
-    console.error(error);
-
-    return res.status(500).json({
-      message: "Internal server error",
-    });
+    return handleError(res, error, "Public Ads Error:");
   }
 };
 
 // SINGLE ADS
-
 const singleAds = async (req, res) => {
   try {
     const { adsId } = req.params;
-
-    const ads = await AdsModel.findById(adsId)
-      .populate({
-        path: "productId",
-        select:
-          "name images description sellingPrice storeId isVerified isActive",
-        populate: {
-          path: "storeId",
-          select:
-            "storeName storeUniqueId images address contactNo whatsappNo",
-        },
-      });
-
-    if (!ads) {
-      return res.status(404).json({
-        message: "Ads not found",
-      });
+    if (!mongoose.isValidObjectId(adsId)) {
+      return res
+        .status(400)
+        .json({ success: false, message: "Invalid ads id" });
     }
 
-    return res.status(200).json({
-      ads,
-    });
-  } catch (error) {
-    console.error(error);
+    const ads = await AdsModel.findById(adsId).lean();
+    if (!ads) {
+      return res
+        .status(404)
+        .json({ success: false, message: "Ads not found" });
+    }
 
-    return res.status(500).json({
-      message: "Internal server error",
-    });
+    return res.status(200).json({ success: true, ads });
+  } catch (error) {
+    return handleError(res, error, "Single Ads Error:");
   }
 };
 
-// UPDATE ADS
-
+// UPDATE (notun video dile replace hobe, isActive toggle kora jabe)
 const updateAds = async (req, res) => {
   try {
     const { adsId } = req.params;
+    if (!mongoose.isValidObjectId(adsId)) {
+      return res
+        .status(400)
+        .json({ success: false, message: "Invalid ads id" });
+    }
 
     const ads = await AdsModel.findById(adsId);
-
     if (!ads) {
-      return res.status(404).json({
-        message: "Ads not found",
-      });
+      return res
+        .status(404)
+        .json({ success: false, message: "Ads not found" });
     }
 
-    if (req.body.productId) {
-      const product = await ProductModel.findById(
-        req.body.productId
-      );
-
-      if (!product) {
-        return res.status(404).json({
-          message: "Product not found",
-        });
-      }
-
-      ads.productId = req.body.productId;
-      ads.storeId = product.storeId; 
-    }
-
-    if (req.body.rank !== undefined) {
-      ads.rank = Number(req.body.rank);
-    }
-
-    if (req.body.expiryDate) {
-      ads.expiryDate = req.body.expiryDate;
-    }
+    const media = await uploadAdsMedia(req.files);
+    if (media) ads.mediaUrl = media.url;
 
     if (req.body.isActive !== undefined) {
-      ads.isActive = req.body.isActive;
+      ads.isActive = parseBool(req.body.isActive);
     }
 
     await ads.save();
 
-    return res.status(200).json({
-      message: "Ads updated successfully",
-      ads,
-    });
+    return res
+      .status(200)
+      .json({ success: true, message: "Ads updated successfully", ads });
   } catch (error) {
-    console.error(error);
-
-    return res.status(500).json({
-      message: "Internal server error",
-    });
+    return handleError(res, error, "Update Ads Error:");
   }
 };
 
-// DELETE ADS
-
+// DELETE
 const deleteAds = async (req, res) => {
   try {
     const { adsId } = req.params;
+    if (!mongoose.isValidObjectId(adsId)) {
+      return res
+        .status(400)
+        .json({ success: false, message: "Invalid ads id" });
+    }
 
-    await AdsModel.findByIdAndDelete(adsId);
+    const ads = await AdsModel.findByIdAndDelete(adsId);
+    if (!ads) {
+      return res
+        .status(404)
+        .json({ success: false, message: "Ads not found" });
+    }
 
-    return res.status(200).json({
-      message: "Ads deleted successfully",
-    });
+    return res
+      .status(200)
+      .json({ success: true, message: "Ads deleted successfully" });
   } catch (error) {
-    console.error(error);
-
-    return res.status(500).json({
-      message: "Internal server error",
-    });
+    return handleError(res, error, "Delete Ads Error:");
   }
 };
 
 module.exports = {
   createAds,
   allAds,
-  adsByRank,
+  publicAds,
   singleAds,
   updateAds,
   deleteAds,

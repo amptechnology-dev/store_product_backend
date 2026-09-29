@@ -34,7 +34,8 @@ const acquireSlot = () => {
 
 const releaseSlot = () => {
   const next = waiting.shift();
-  if (next) next(); // slot ta shorasori porer jon ke dao
+  if (next)
+    next(); // slot ta shorasori porer jon ke dao
   else running--;
 };
 
@@ -196,4 +197,31 @@ const uploadBannerMedia = async (files = []) => {
   return { url, mediaType: "image" };
 };
 
-module.exports = { uploadSimpleImages, uploadVariantImages, uploadBannerMedia };
+const uploadAdsMedia = async (files = []) => {
+  const file = files.find((f) =>
+    ["media", "video", "image"].includes(f.fieldname),
+  );
+  if (!file) return null;
+
+  const isVideo = isVideoFile(file);
+  const maxSize = isVideo ? MAX_BANNER_VIDEO_SIZE : MAX_BANNER_IMAGE_SIZE;
+
+  if (file.size > maxSize) {
+    const err = new Error(
+      `${isVideo ? "Video" : "Image"} must be under ${maxSize / 1024 / 1024}MB`,
+    );
+    err.statusCode = 400;
+    throw err;
+  }
+
+  const url = await uploadPreparedFile("amp-store/ads", file);
+
+  return { url, mediaType: "gif" };
+};
+
+module.exports = {
+  uploadSimpleImages,
+  uploadVariantImages,
+  uploadBannerMedia,
+  uploadAdsMedia,
+};
