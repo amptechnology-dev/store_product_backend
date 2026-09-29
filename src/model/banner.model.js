@@ -22,6 +22,12 @@ const bannerSchema = new mongoose.Schema(
       ref: "Store",
       required: true,
     },
+    // optional: category chhara banner "general" banner hishebe thakbe
+    categoryId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Category",
+      default: null,
+    },
     userId: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "User",
@@ -39,6 +45,8 @@ const bannerSchema = new mongoose.Schema(
   },
   { timestamps: true },
 );
+
+bannerSchema.index({ storeId: 1, categoryId: 1, isActive: 1, createdAt: -1 });
 
 const BannerModel = mongoose.model("Banner", bannerSchema);
 module.exports = BannerModel;

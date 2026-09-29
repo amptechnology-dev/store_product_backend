@@ -11,6 +11,7 @@ const {
   updateBanner,
   deleteBanner,
   publicGetAllBanners,
+  publicGetBannersByCategory
 } = require("../controller/banner.controller.js");
 
 // ---------- STORE (authenticated) ----------
@@ -44,5 +45,6 @@ router.delete(
 
 // ---------- PUBLIC ----------
 router.get("/banners", publicGetAllBanners);
+router.get("/public/by-category/:categoryId", publicGetBannersByCategory);
 
 module.exports = router;

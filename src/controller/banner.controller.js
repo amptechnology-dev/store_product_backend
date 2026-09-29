@@ -1,11 +1,13 @@
+const mongoose = require("mongoose");
 const BannerModel = require("../model/banner.model.js");
 const UserModel = require("../model/user.model.js");
 const StoreModel = require("../model/store.model.js");
+const CategoryModel = require("../model/category.model.js");
 const {
   createBannerSchema,
   updateBannerSchema,
 } = require("../schema/banner.schema.js");
-const { uploadBannerMedia } = require("../helper/productImages.js"); 
+const { uploadBannerMedia } = require("../helper/productImages.js");
 
 const getUserId = (req) => req.user?._id || req.user?.id;
 
@@ -47,6 +49,10 @@ const handleError = (res, error, label) => {
     .json({ success: false, message: "Internal server error" });
 };
 
+// category ta ei store er kina check (banner e onno store er category dewa jabe na)
+const categoryBelongsToStore = (categoryId, storeId) =>
+  CategoryModel.exists({ _id: categoryId, storeId });
+
 // ===================== STORE (authenticated) =====================
 
 const createBanner = async (req, res) => {
@@ -60,7 +66,9 @@ const createBanner = async (req, res) => {
 
     const user = await UserModel.findById(userId);
     if (!user) {
-      return res.status(404).json({ success: false, message: "User not found" });
+      return res
+        .status(404)
+        .json({ success: false, message: "User not found" });
     }
     if (user.role !== "STORE") {
       return res
@@ -77,6 +85,20 @@ const createBanner = async (req, res) => {
       });
     }
 
+    // categoryId optional, dile oi store er category hote hobe
+    if (parsedData.categoryId) {
+      const validCategory = await categoryBelongsToStore(
+        parsedData.categoryId,
+        parsedData.storeId,
+      );
+      if (!validCategory) {
+        return res.status(400).json({
+          success: false,
+          message: "Category not found for this store",
+        });
+      }
+    }
+
     const media = await uploadBannerMedia(req.files);
     if (!media) {
       return res
@@ -86,6 +108,7 @@ const createBanner = async (req, res) => {
 
     const banner = await BannerModel.create({
       ...parsedData,
+      categoryId: parsedData.categoryId || null,
       image: media.url,
       mediaType: media.mediaType,
       userId,
@@ -119,6 +142,7 @@ const getAllBanners = async (req, res) => {
     const [banners, totalBanners] = await Promise.all([
       BannerModel.find(match)
         .populate("storeId", "storeName storeUniqueId")
+        .populate("categoryId", "name")
         .sort({ createdAt: -1 })
         .skip(skip)
         .limit(limit),
@@ -143,13 +167,20 @@ const getSingleBanner = async (req, res) => {
     const { id } = req.params;
     const userId = getUserId(req);
 
-    const banner = await BannerModel.findOne({ _id: id, userId }).populate(
-      "storeId",
-      "storeName storeUniqueId",
-    );
+    if (!mongoose.isValidObjectId(id)) {
+      return res
+        .status(400)
+        .json({ success: false, message: "Invalid banner id" });
+    }
+
+    const banner = await BannerModel.findOne({ _id: id, userId })
+      .populate("storeId", "storeName storeUniqueId")
+      .populate("categoryId", "name");
 
     if (!banner) {
-      return res.status(404).json({ success: false, message: "Banner not found" });
+      return res
+        .status(404)
+        .json({ success: false, message: "Banner not found" });
     }
 
     return res.status(200).json({ success: true, banner });
@@ -166,10 +197,17 @@ const updateBanner = async (req, res) => {
     if (!userId) {
       return res.status(401).json({ success: false, message: "Unauthorized" });
     }
+    if (!mongoose.isValidObjectId(id)) {
+      return res
+        .status(400)
+        .json({ success: false, message: "Invalid banner id" });
+    }
 
     const user = await UserModel.findById(userId);
     if (!user) {
-      return res.status(404).json({ success: false, message: "User not found" });
+      return res
+        .status(404)
+        .json({ success: false, message: "User not found" });
     }
     if (user.role !== "STORE") {
       return res
@@ -179,7 +217,9 @@ const updateBanner = async (req, res) => {
 
     const existingBanner = await BannerModel.findOne({ _id: id, userId });
     if (!existingBanner) {
-      return res.status(404).json({ success: false, message: "Banner not found" });
+      return res
+        .status(404)
+        .json({ success: false, message: "Banner not found" });
     }
 
     const parsedData = updateBannerSchema.parse(req.body);
@@ -187,6 +227,22 @@ const updateBanner = async (req, res) => {
     const { storeId, ...safeData } = parsedData;
 
     const updateFields = { ...safeData };
+
+    // categoryId: undefined = change nai, null = remove, value = set (store check shoho)
+    if (safeData.categoryId === undefined) {
+      delete updateFields.categoryId;
+    } else if (safeData.categoryId) {
+      const validCategory = await categoryBelongsToStore(
+        safeData.categoryId,
+        existingBanner.storeId,
+      );
+      if (!validCategory) {
+        return res.status(400).json({
+          success: false,
+          message: "Category not found for this store",
+        });
+      }
+    }
 
     // notun media dile replace, na dile purono ta thakbe
     const media = await uploadBannerMedia(req.files);
@@ -219,10 +275,17 @@ const deleteBanner = async (req, res) => {
     if (!userId) {
       return res.status(401).json({ success: false, message: "Unauthorized" });
     }
+    if (!mongoose.isValidObjectId(id)) {
+      return res
+        .status(400)
+        .json({ success: false, message: "Invalid banner id" });
+    }
 
     const banner = await BannerModel.findOneAndDelete({ _id: id, userId });
     if (!banner) {
-      return res.status(404).json({ success: false, message: "Banner not found" });
+      return res
+        .status(404)
+        .json({ success: false, message: "Banner not found" });
     }
 
     return res
@@ -238,6 +301,7 @@ const publicGetAllBanners = async (req, res) => {
   try {
     const banners = await BannerModel.find({ isActive: true })
       .populate("storeId", "storeName storeUniqueId")
+      .populate("categoryId", "name")
       .sort({ createdAt: -1 })
       .select("-userId -__v");
 
@@ -251,6 +315,44 @@ const publicGetAllBanners = async (req, res) => {
   }
 };
 
+const publicGetBannersByCategory = async (req, res) => {
+  try {
+    const { categoryId } = req.params; // <-- params theke
+    const { storeId, includeGeneral } = req.query;
+
+    if (!mongoose.isValidObjectId(categoryId)) {
+      return res
+        .status(400)
+        .json({ success: false, message: "Invalid category id" });
+    }
+    if (storeId && !mongoose.isValidObjectId(storeId)) {
+      return res
+        .status(400)
+        .json({ success: false, message: "Invalid store id" });
+    }
+
+    const filter = { isActive: true };
+    if (storeId) filter.storeId = storeId;
+
+    filter.categoryId =
+      includeGeneral === "true" ? { $in: [categoryId, null] } : categoryId;
+
+    const banners = await BannerModel.find(filter)
+      .populate("storeId", "storeName storeUniqueId")
+      .populate("categoryId", "name")
+      .sort({ createdAt: -1 })
+      .select("-userId -__v");
+
+    return res.status(200).json({
+      success: true,
+      count: banners.length,
+      banners,
+    });
+  } catch (error) {
+    return handleError(res, error, "Public Get Banners By Category Error");
+  }
+};
+
 module.exports = {
   createBanner,
   getAllBanners,
@@ -258,4 +360,5 @@ module.exports = {
   updateBanner,
   deleteBanner,
   publicGetAllBanners,
+  publicGetBannersByCategory,
 };

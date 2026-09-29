@@ -20,9 +20,15 @@ const bannerURLSchema = z
   }, "Enter a valid URL starting with http:// or https://")
   .optional();
 
+const optionalCategoryId = z.preprocess(
+  (v) => (v === "" || v === "null" ? null : v),
+  objectId.nullable().optional(),
+);
+
 const createBannerSchema = z.object({
   name: z.string().trim().min(1, "Banner name is required"),
   storeId: objectId,
+  categoryId: optionalCategoryId,
   bannerURL: bannerURLSchema,
 });
 
