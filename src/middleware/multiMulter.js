@@ -47,7 +47,7 @@ const upload = multer({
   storage,
   fileFilter,
   limits: {
-    fileSize: 50 * 1024 * 1024,
+    fileSize: 100 * 1024 * 1024, // video source 100MB (image er limit helper/frontend e check hoy)
     files: 30,
   },
 });
@@ -58,7 +58,7 @@ const uploadMultiImages = (req, res, next) => {
 
     if (err instanceof multer.MulterError) {
       const messages = {
-        LIMIT_FILE_SIZE: "File too large. Maximum size is 50MB per file",
+        LIMIT_FILE_SIZE: "File too large. Maximum size is 100MB per file",
         LIMIT_FILE_COUNT: "Too many files uploaded",
       };
       return res.status(400).json({
