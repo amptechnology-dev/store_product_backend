@@ -34,6 +34,7 @@ const userSchema = new mongoose.Schema(
     address: { type: addressSchema, default: null },
     isActive: { type: Boolean, default: true },
     isVerified: { type: Boolean, default: false },
+    fcmTokens: { type: [String], default: [], select: false },
   },
   { timestamps: true },
 );
