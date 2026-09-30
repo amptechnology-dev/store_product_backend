@@ -3,7 +3,7 @@ set -e
 
 cd "$(dirname "$0")"
 
-DOMAIN="estore.amptechnology.in"
+DOMAIN="estorebackend.amptechnology.in"
 EMAIL="devs.amptechnology@gmail.com"
 CONTAINER="estore-app"
 APP_PORT="8090"
