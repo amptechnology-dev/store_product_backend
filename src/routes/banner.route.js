@@ -5,16 +5,23 @@ const authorize = require("../middleware/authorize.js");
 const { uploadMultiImages } = require("../middleware/multiMulter.js");
 
 const {
+  getProductOptions,
   createBanner,
   getAllBanners,
   getSingleBanner,
   updateBanner,
   deleteBanner,
   publicGetAllBanners,
-  publicGetBannersByCategory
+  publicGetBannersByCategory,
 } = require("../controller/banner.controller.js");
 
 // ---------- STORE (authenticated) ----------
+router.get(
+  "/product-options",
+  verifyJwt,
+  authorize("STORE"),
+  getProductOptions,
+);
 router.post(
   "/create-banner",
   verifyJwt,

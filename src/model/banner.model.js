@@ -28,25 +28,23 @@ const bannerSchema = new mongoose.Schema(
       ref: "Category",
       default: null,
     },
+    // optional: banner e click korle ei product e jabe
+    productId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Product",
+      default: null,
+    },
     userId: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "User",
       required: true,
-    },
-    bannerURL: {
-      type: String,
-      trim: true,
-      default: "",
-      match: [
-        /^https?:\/\/.+/i,
-        "Banner URL must start with http:// or https://",
-      ],
     },
   },
   { timestamps: true },
 );
 
 bannerSchema.index({ storeId: 1, categoryId: 1, isActive: 1, createdAt: -1 });
+bannerSchema.index({ productId: 1 });
 
 const BannerModel = mongoose.model("Banner", bannerSchema);
 module.exports = BannerModel;

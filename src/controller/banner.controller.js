@@ -3,6 +3,7 @@ const BannerModel = require("../model/banner.model.js");
 const UserModel = require("../model/user.model.js");
 const StoreModel = require("../model/store.model.js");
 const CategoryModel = require("../model/category.model.js");
+const ProductModel = require("../model/product.model.js");
 const {
   createBannerSchema,
   updateBannerSchema,
@@ -53,7 +54,69 @@ const handleError = (res, error, label) => {
 const categoryBelongsToStore = (categoryId, storeId) =>
   CategoryModel.exists({ _id: categoryId, storeId });
 
+// product ta ei store er kina check, ar category dile product oi category r kina
+// error message return kore, sob thik thakle null
+const validateProductLink = async ({ productId, categoryId, storeId }) => {
+  if (!productId) return null;
+
+  const product = await ProductModel.findOne({ _id: productId, storeId })
+    .select("categoryId")
+    .lean();
+  if (!product) return "Product not found for this store";
+
+  if (categoryId && String(product.categoryId) !== String(categoryId)) {
+    return "Selected product does not belong to the selected category";
+  }
+  return null;
+};
+
+const BANNER_POPULATE = [
+  { path: "storeId", select: "storeName storeUniqueId" },
+  { path: "categoryId", select: "name" },
+  { path: "productId", select: "name productCode images" },
+];
+
 // ===================== STORE (authenticated) =====================
+
+// form er product dropdown er jonno: ei store er product (category dile shudhu oi category r)
+const getProductOptions = async (req, res) => {
+  try {
+    const userId = getUserId(req);
+    const { storeId, categoryId } = req.query;
+
+    if (!mongoose.isValidObjectId(storeId)) {
+      return res
+        .status(400)
+        .json({ success: false, message: "Invalid store id" });
+    }
+    if (categoryId && !mongoose.isValidObjectId(categoryId)) {
+      return res
+        .status(400)
+        .json({ success: false, message: "Invalid category id" });
+    }
+
+    const ownsStore = await StoreModel.exists({ _id: storeId, userId });
+    if (!ownsStore) {
+      return res.status(403).json({
+        success: false,
+        message: "Store not found or not owned by you",
+      });
+    }
+
+    const filter = { storeId };
+    if (categoryId) filter.categoryId = categoryId;
+
+    const products = await ProductModel.find(filter)
+      .select("name productCode categoryId")
+      .sort({ name: 1 })
+      .limit(500)
+      .lean();
+
+    return res.status(200).json({ success: true, products });
+  } catch (error) {
+    return handleError(res, error, "Get Product Options Error");
+  }
+};
 
 const createBanner = async (req, res) => {
   try {
@@ -99,6 +162,16 @@ const createBanner = async (req, res) => {
       }
     }
 
+    // productId optional, dile oi store er product hote hobe
+    const linkError = await validateProductLink({
+      productId: parsedData.productId,
+      categoryId: parsedData.categoryId,
+      storeId: parsedData.storeId,
+    });
+    if (linkError) {
+      return res.status(400).json({ success: false, message: linkError });
+    }
+
     const media = await uploadBannerMedia(req.files);
     if (!media) {
       return res
@@ -109,6 +182,7 @@ const createBanner = async (req, res) => {
     const banner = await BannerModel.create({
       ...parsedData,
       categoryId: parsedData.categoryId || null,
+      productId: parsedData.productId || null,
       image: media.url,
       mediaType: media.mediaType,
       userId,
@@ -141,8 +215,7 @@ const getAllBanners = async (req, res) => {
 
     const [banners, totalBanners] = await Promise.all([
       BannerModel.find(match)
-        .populate("storeId", "storeName storeUniqueId")
-        .populate("categoryId", "name")
+        .populate(BANNER_POPULATE)
         .sort({ createdAt: -1 })
         .skip(skip)
         .limit(limit),
@@ -173,9 +246,9 @@ const getSingleBanner = async (req, res) => {
         .json({ success: false, message: "Invalid banner id" });
     }
 
-    const banner = await BannerModel.findOne({ _id: id, userId })
-      .populate("storeId", "storeName storeUniqueId")
-      .populate("categoryId", "name");
+    const banner = await BannerModel.findOne({ _id: id, userId }).populate(
+      BANNER_POPULATE,
+    );
 
     if (!banner) {
       return res
@@ -244,6 +317,35 @@ const updateBanner = async (req, res) => {
       }
     }
 
+    // productId: undefined = change nai, null = remove, value = set
+    if (safeData.productId === undefined) {
+      delete updateFields.productId;
+    }
+
+    // product ba category change hole, final (effective) combination ta valid kina check
+    const effectiveProductId =
+      safeData.productId === undefined
+        ? existingBanner.productId
+        : safeData.productId;
+    const effectiveCategoryId =
+      safeData.categoryId === undefined
+        ? existingBanner.categoryId
+        : safeData.categoryId;
+
+    if (
+      effectiveProductId &&
+      (safeData.productId !== undefined || safeData.categoryId !== undefined)
+    ) {
+      const linkError = await validateProductLink({
+        productId: effectiveProductId,
+        categoryId: effectiveCategoryId,
+        storeId: existingBanner.storeId,
+      });
+      if (linkError) {
+        return res.status(400).json({ success: false, message: linkError });
+      }
+    }
+
     // notun media dile replace, na dile purono ta thakbe
     const media = await uploadBannerMedia(req.files);
     if (media) {
@@ -254,7 +356,7 @@ const updateBanner = async (req, res) => {
     const updatedBanner = await BannerModel.findByIdAndUpdate(
       id,
       { $set: updateFields },
-      { new: true, runValidators: true },
+      { returnDocument: "after", runValidators: true },
     );
 
     return res.status(200).json({
@@ -300,8 +402,7 @@ const deleteBanner = async (req, res) => {
 const publicGetAllBanners = async (req, res) => {
   try {
     const banners = await BannerModel.find({ isActive: true })
-      .populate("storeId", "storeName storeUniqueId")
-      .populate("categoryId", "name")
+      .populate(BANNER_POPULATE)
       .sort({ createdAt: -1 })
       .select("-userId -__v");
 
@@ -317,7 +418,7 @@ const publicGetAllBanners = async (req, res) => {
 
 const publicGetBannersByCategory = async (req, res) => {
   try {
-    const { categoryId } = req.params; // <-- params theke
+    const { categoryId } = req.params;
     const { storeId, includeGeneral } = req.query;
 
     if (!mongoose.isValidObjectId(categoryId)) {
@@ -338,8 +439,7 @@ const publicGetBannersByCategory = async (req, res) => {
       includeGeneral === "true" ? { $in: [categoryId, null] } : categoryId;
 
     const banners = await BannerModel.find(filter)
-      .populate("storeId", "storeName storeUniqueId")
-      .populate("categoryId", "name")
+      .populate(BANNER_POPULATE)
       .sort({ createdAt: -1 })
       .select("-userId -__v");
 
@@ -354,6 +454,7 @@ const publicGetBannersByCategory = async (req, res) => {
 };
 
 module.exports = {
+  getProductOptions,
   createBanner,
   getAllBanners,
   getSingleBanner,
