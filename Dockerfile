@@ -1,14 +1,22 @@
-FROM node:20
+FROM node:22-bookworm-slim
 
-WORKDIR /app
+# Chromium (puppeteer-core er jonno) + font
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends chromium fonts-liberation ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
 
-COPY package*.json ./
+WORKDIR /usr/src/app
 
-RUN npm install
+COPY package.json package-lock.json ./
+RUN npm ci --omit=dev && npm cache clean --force
 
-COPY . .
-EXPOSE 8090
+COPY --chown=node:node . .
+RUN chown node:node /usr/src/app
 
 ENV NODE_ENV=production
+ENV CHROME_PATH=/usr/bin/chromium
 
-CMD ["npm","start"]
+USER node
+EXPOSE 8090
+
+CMD ["node", "index.js"]
