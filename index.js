@@ -44,7 +44,7 @@ app.get("/.well-known/assetlinks.json", (req, res) => {
 app.use(express.static(path.join(__dirname, "public")));
 
 app.set("view engine", "ejs");
-app.set("views", path.join(__dirname, "views"));
+app.set("views", path.join(__dirname, "src", "views"));
 
 const registerRoutes = require("./src/routes/register.routes.js");
 const loginRoutes = require("./src/routes/login.routes.js");
