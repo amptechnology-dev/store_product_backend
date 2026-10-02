@@ -4,7 +4,7 @@ const StoreModel = require("../model/store.model.js");
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 const { passwordGenerator } = require("../helper/PasswordGenerator.js");
-const { loginSchema,updateUserSchema } = require("../schema/user.schema.js");
+const { loginSchema, updateUserSchema } = require("../schema/user.schema.js");
 const uploadSingleImage = require("../helper/upload.js");
 const sendPasswordEmail = require("../helper/mail.service.js");
 const transporter = require("../helper/emailtransporter.js");
@@ -87,75 +87,31 @@ const continueWithGoogle = async (req, res) => {
 const login = async (req, res) => {
   try {
     const parsedData = loginSchema.parse(req.body);
-    const user = await UserModel.findOne({ email: parsedData.email });
+    const user = await UserModel.findOne({
+      email: parsedData.email.trim().toLowerCase(),
+    });
+
     if (!user) {
-      return res.status(404).json({
-        message: "User not found",
-      });
+      return res.status(404).json({ message: "User not found" });
     }
     if (!user.isVerified) {
       return res
         .status(401)
         .json({ status: false, message: "Your account is not verified" });
     }
+
     const isMatch = await comparePassword(parsedData.password, user.password);
     if (!isMatch) {
-      return res.status(401).json({
-        message: "Invalid credentials",
-      });
+      return res.status(401).json({ message: "Invalid credentials" });
     }
 
-    /* TOKEN GENERATION */
-
-    // ✅ FIX: role USER hole full address object token-e jabe,
-    // onno role (ADMIN/STORE) hole address key-i thakbe na
-    const tokenPayload = {
-      userId: user._id,
-      role: user.role,
-      email: user.email,
-      phone: user.phone,
-      isActive: user.isActive,
-    };
-
-    if (user.role === "USER" && user.address) {
-      tokenPayload.address = {
-        addressLine: user.address.addressLine,
-        area: user.address.area,
-        city: user.address.city,
-        state: user.address.state,
-        pincode: user.address.pincode,
-        country: user.address.country,
-      };
-    }
-
-    const token = jwt.sign(tokenPayload, process.env.TOKEN_SECRET, {
-      expiresIn: process.env.TOKEN_EXPIRATION,
-    });
-
-    res.cookie("login-token", token, {
-      httpOnly: true,
-      secure: process.env.NODE_ENV === "production",
-      path: "/",
-      sameSite: "strict",
-    });
-
-    // ✅ response body-teo shei niyom mana hocche (role USER hole address dekhabe)
-    const responseUser = {
-      id: user._id,
-      email: user.email,
-      role: user.role,
-      phone: user.phone,
-      isActive: user.isActive,
-    };
-
-    if (user.role === "USER" && user.address) {
-      responseUser.address = user.address;
-    }
+    const token = generateAuthToken(user);
+    setAuthCookie(res, token);
 
     return res.status(200).json({
       message: "Login successful",
       token,
-      user: responseUser,
+      user: buildResponseUser(user),
     });
   } catch (error) {
     if (error.name === "ZodError") {
@@ -168,12 +124,8 @@ const login = async (req, res) => {
         })),
       });
     }
-
     console.error("Login error:", error);
-
-    return res.status(500).json({
-      message: "Error logging in user",
-    });
+    return res.status(500).json({ message: "Error logging in user" });
   }
 };
 

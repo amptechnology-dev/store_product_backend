@@ -18,6 +18,11 @@ const sendEmailVerificationOTP = require("../helper/sendEmailVerificationOTP.js"
 const EmailVerifyModel = require("../model/otpverify.js");
 const RecentSearchModel = require("../model/recentSearch.model");
 const sendStoreCredentialsEmail = require("../helper/sendStoreCredentialsEmail.js");
+const {
+  generateAuthToken,
+  setAuthCookie,
+  buildResponseUser,
+} = require("../helper/authToken");
 
 const toNumberOrUndefined = (value) => {
   if (value === undefined || value === null || value === "") return undefined;
@@ -134,11 +139,12 @@ const verifyEmailOTP = async (req, res) => {
         .status(400)
         .json({ status: false, message: "All fields are required" });
     }
-    const existingUser = await UserModel.findOne({ email });
+    const normalizedEmail = email.trim().toLowerCase();
+    const existingUser = await UserModel.findOne({ email: normalizedEmail });
     if (!existingUser) {
       return res
         .status(404)
-        .json({ status: "failed", message: "Email doesn't exists" });
+        .json({ status: false, message: "Email doesn't exist" });
     }
     if (existingUser.isVerified) {
       return res
@@ -147,38 +153,38 @@ const verifyEmailOTP = async (req, res) => {
     }
     const emailVerification = await EmailVerifyModel.findOne({
       userId: existingUser._id,
-      otp,
+      otp: String(otp).trim(),
     });
     if (!emailVerification) {
-      if (!existingUser.isVerified) {
-        await sendEmailVerificationOTP(req, existingUser);
-        return res.status(400).json({
-          status: false,
-          message: "Invalid OTP, new OTP sent to your email",
-        });
-      }
-      return res.status(400).json({ status: false, message: "Invalid OTP" });
-    }
-    const currentTime = new Date();
-    const expirationTime = new Date(
-      emailVerification.createdAt.getTime() + 15 * 60 * 1000,
-    );
-    if (currentTime > expirationTime) {
       await sendEmailVerificationOTP(req, existingUser);
       return res.status(400).json({
-        status: "failed",
+        status: false,
+        message: "Invalid OTP, new OTP sent to your email",
+      });
+    }
+    const expirationTime =
+      emailVerification.createdAt.getTime() + 15 * 60 * 1000;
+    if (Date.now() > expirationTime) {
+      await sendEmailVerificationOTP(req, existingUser);
+      return res.status(400).json({
+        status: false,
         message: "OTP expired, new OTP sent to your email",
       });
     }
     existingUser.isVerified = true;
     await existingUser.save();
     await EmailVerifyModel.deleteMany({ userId: existingUser._id });
-    return res
-      .status(200)
-      .json({ status: true, message: "Email verified successfully" });
+    const token = generateAuthToken(existingUser);
+    setAuthCookie(res, token);
+    return res.status(200).json({
+      status: true,
+      message: "Email verified successfully",
+      token,
+      user: buildResponseUser(existingUser),
+    });
   } catch (error) {
-    console.error(error);
-    res.status(500).json({
+    console.error("Verify OTP error:", error);
+    return res.status(500).json({
       status: false,
       message: "Unable to verify email, please try again later",
     });
@@ -1354,7 +1360,7 @@ const registerUser = async (req, res) => {
       password: hashedPassword,
       role: "USER",
       provider: "LOCAL",
-      isVerified: true,
+      isVerified: false,
       address: parsedData.address,
     });
     let otpSent = true;
