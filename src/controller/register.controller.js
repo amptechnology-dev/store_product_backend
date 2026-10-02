@@ -48,56 +48,17 @@ const registerAdmin = async (req, res) => {
     const user = new UserModel({
       ...parsedData,
       password: hashedPassword,
+      role: "ADMIN",
+      isVerified: true,
     });
 
     await user.save();
 
-    const userId = user._id; // ⭐ newly created user id
-
     await sendPasswordEmail(parsedData.email, parsedData.password);
     // await sendPasswordSMS(parsedData.phone, parsedData.email, parsedData.password);
 
-    const defaultHeads = [
-      {
-        userId: userId,
-        name: "Fuel Purchase",
-        type: "EXPENSE",
-      },
-      {
-        userId: userId,
-        name: "Fuel Sales",
-        type: "INCOME",
-      },
-      {
-        userId: userId,
-        name: "Accessory Expenses",
-        type: "EXPENSE",
-      },
-      {
-        userId: userId,
-        name: "Accessory Sales",
-        type: "INCOME",
-      },
-    ];
-
-    // Check existing heads to avoid duplicates
-    const existingHeads = await AccountHead.find({
-      userId: userId,
-      name: { $in: defaultHeads.map((h) => h.name) },
-    });
-
-    const existingNames = existingHeads.map((h) => h.name);
-
-    const headsToInsert = defaultHeads.filter(
-      (head) => !existingNames.includes(head.name),
-    );
-
-    if (headsToInsert.length > 0) {
-      await AccountHead.insertMany(headsToInsert);
-    }
-
     return res.status(201).json({
-      message: "Petrol Pump registered successfully",
+      message: "Super Admin Register Successfully",
       user,
     });
   } catch (error) {

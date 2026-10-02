@@ -1,6 +1,5 @@
 const { z } = require("zod");
 
-// address alada optional field, kintu jodi deoa hoy tahole er bhitorer required field gulo thik thakte hobe
 const addressSchema = z.object({
   addressLine: z.string().trim().min(1, "Address line is required"),
   area: z.string().trim().optional(),
@@ -23,7 +22,7 @@ const createUserSchema = z.object({
 
   password: z.string().min(6, "Password must be at least 6 characters"),
 
-  role: z.enum(["ADMIN", "MANAGER", "CASHIER", "ACCOUNTANT"]).optional(),
+  role: z.enum(["ADMIN", "STORE", "USER"]).optional(),
 
   isActive: z.boolean().optional(),
 
