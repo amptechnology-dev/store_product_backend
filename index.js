@@ -65,6 +65,7 @@ const notificationRoutes = require("./src/routes/notification.route.js");
 const storeSettingRoutes = require("./src/routes/storeSetting.routes.js");
 const workerRoutes = require("./src/routes/worker.routes.js");
 const stockRoutes = require("./src/routes/stock.routes.js");
+const companyRoutes = require("./src/routes/company.routes.js");
 
 app.use("/api/register", registerRoutes);
 app.use("/api/login", loginRoutes);
@@ -85,6 +86,7 @@ app.use("/api/notifications",notificationRoutes);
 app.use("/api/store-settings", storeSettingRoutes);
 app.use("/api/worker", workerRoutes);
 app.use("/api/stock", stockRoutes);
+app.use("/api/company", companyRoutes);
 
 const port = process.env.PORT || 8090;
 
