@@ -54,7 +54,8 @@ if test -f "$CERT_PATH"; then
   git pull --ff-only || echo "git pull skipped"
 
   docker compose down || true
-  docker compose up -d --build --remove-orphans
+  docker compose pull
+  docker compose up -d --remove-orphans
 
   wait_for_network
 
@@ -127,7 +128,8 @@ echo "Certificate obtained successfully!"
 # ── Step 3: Start app FIRST (nginx needs the upstream host to resolve) ──
 echo "Starting $CONTAINER..."
 docker compose down || true
-docker compose up -d --build --remove-orphans
+docker compose pull
+docker compose up -d --remove-orphans
 
 wait_for_network
 

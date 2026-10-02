@@ -1,11 +1,10 @@
 services:
   app:
     container_name: estore-app
-    build: .
+    image: ghcr.io/amptechnology-dev/store_product_backend:latest
     env_file:
       - .env
     environment:
-      # .env te Windows er CHROME_PATH ache, eta oitake override kore
       - CHROME_PATH=/usr/bin/chromium
     expose:
       - '8090'
