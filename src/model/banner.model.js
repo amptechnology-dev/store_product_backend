@@ -17,17 +17,20 @@ const bannerSchema = new mongoose.Schema(
       default: "image",
     },
     isActive: { type: Boolean, default: true },
+    // true hole eta offer banner (public offer API te ashbe + user ke notification jabe)
+    offerBanner: { type: Boolean, default: false },
     storeId: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "Store",
       required: true,
     },
-    // optional: category chhara banner "general" banner hishebe thakbe
-    categoryId: {
-      type: mongoose.Schema.Types.ObjectId,
-      ref: "Category",
-      default: null,
-    },
+    // optional: khali array = "general" banner, nahole ekadhik category
+    categoryIds: [
+      {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: "Category",
+      },
+    ],
     // optional: banner e click korle ei product e jabe
     productId: {
       type: mongoose.Schema.Types.ObjectId,
@@ -43,7 +46,8 @@ const bannerSchema = new mongoose.Schema(
   { timestamps: true },
 );
 
-bannerSchema.index({ storeId: 1, categoryId: 1, isActive: 1, createdAt: -1 });
+bannerSchema.index({ storeId: 1, categoryIds: 1, isActive: 1, createdAt: -1 });
+bannerSchema.index({ offerBanner: 1, isActive: 1, createdAt: -1 });
 bannerSchema.index({ productId: 1 });
 
 const BannerModel = mongoose.model("Banner", bannerSchema);

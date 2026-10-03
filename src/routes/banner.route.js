@@ -12,6 +12,7 @@ const {
   updateBanner,
   deleteBanner,
   publicGetAllBanners,
+  publicGetOfferBanners,
   publicGetBannersByCategory,
 } = require("../controller/banner.controller.js");
 
@@ -52,6 +53,7 @@ router.delete(
 
 // ---------- PUBLIC ----------
 router.get("/banners", publicGetAllBanners);
+router.get("/public/offer-banners", publicGetOfferBanners);
 router.get("/public/by-category/:categoryId", publicGetBannersByCategory);
 
 module.exports = router;

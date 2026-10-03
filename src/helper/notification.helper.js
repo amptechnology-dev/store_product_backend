@@ -6,6 +6,11 @@ const StoreModel = require("../model/store.model.js");
 const NotificationModel = require("../model/notification.model.js");
 const UserModel = require("../model/user.model.js");
 
+const INVALID_TOKEN_CODES = [
+  "messaging/invalid-registration-token",
+  "messaging/registration-token-not-registered",
+];
+
 const notifyStore = async ({ order, type, title, body }) => {
   try {
     await NotificationModel.create({
@@ -31,13 +36,7 @@ const notifyStore = async ({ order, type, title, body }) => {
 
     const invalidTokens = [];
     response.responses.forEach((r, idx) => {
-      if (
-        !r.success &&
-        [
-          "messaging/invalid-registration-token",
-          "messaging/registration-token-not-registered",
-        ].includes(r.error?.code)
-      ) {
+      if (!r.success && INVALID_TOKEN_CODES.includes(r.error?.code)) {
         invalidTokens.push(store.fcmTokens[idx]);
       }
     });
@@ -145,13 +144,7 @@ const notifyUserOrderStatus = async (order) => {
 
     const invalidTokens = [];
     response.responses.forEach((r, idx) => {
-      if (
-        !r.success &&
-        [
-          "messaging/invalid-registration-token",
-          "messaging/registration-token-not-registered",
-        ].includes(r.error?.code)
-      ) {
+      if (!r.success && INVALID_TOKEN_CODES.includes(r.error?.code)) {
         invalidTokens.push(user.fcmTokens[idx]);
       }
     });
@@ -166,8 +159,149 @@ const notifyUserOrderStatus = async (order) => {
   }
 };
 
+// ===================== OFFER BANNER -> shob USER role er user =====================
+const USER_BATCH_SIZE = 500; 
+const FCM_BATCH_SIZE = 500;
+
+const VIDEO_URL_REGEX = /\.(mp4|webm|mov)(\?.*)?$/i;
+
+// banner media image/gif na video seta bujhe nao
+const getBannerMedia = (banner) => {
+  const url = banner.image || null;
+  if (!url) return { mediaUrl: null, mediaType: null };
+  const isVideo = banner.mediaType === "video" || VIDEO_URL_REGEX.test(url);
+  return { mediaUrl: url, mediaType: isVideo ? "video" : "image" };
+};
+
+const sendOfferToUserBatch = async ({
+  users,
+  banner,
+  title,
+  body,
+  mediaUrl,
+  mediaType,
+}) => {
+  await NotificationModel.insertMany(
+    users.map((u) => ({
+      userId: u._id,
+      type: "NEW_OFFER",
+      title,
+      body,
+      bannerId: banner._id,
+      mediaUrl,
+      mediaType,
+    })),
+    { ordered: false },
+  );
+
+  if (!isFirebaseConfigured) return;
+
+  const tokens = [...new Set(users.flatMap((u) => u.fcmTokens || []))];
+  if (!tokens.length) return;
+
+  const pushImage =
+    mediaType === "image" && mediaUrl && /^https:\/\//i.test(mediaUrl)
+      ? mediaUrl
+      : undefined;
+
+  const invalidTokens = [];
+  for (let i = 0; i < tokens.length; i += FCM_BATCH_SIZE) {
+    const chunk = tokens.slice(i, i + FCM_BATCH_SIZE);
+
+    const response = await getMessaging().sendEachForMulticast({
+      notification: {
+        title,
+        body,
+        ...(pushImage ? { imageUrl: pushImage } : {}),
+      },
+      data: {
+        type: "NEW_OFFER",
+        bannerId: String(banner._id),
+        storeId: String(banner.storeId),
+        mediaUrl: mediaUrl || "",
+        mediaType: mediaType || "",
+      },
+      android: {
+        priority: "high",
+        notification: pushImage ? { imageUrl: pushImage } : {},
+      },
+      apns: {
+        payload: { aps: { "mutable-content": 1 } },
+        ...(pushImage ? { fcmOptions: { imageUrl: pushImage } } : {}),
+      },
+      tokens: chunk,
+    });
+
+    response.responses.forEach((r, idx) => {
+      if (!r.success && INVALID_TOKEN_CODES.includes(r.error?.code)) {
+        invalidTokens.push(chunk[idx]);
+      }
+    });
+  }
+
+  if (invalidTokens.length) {
+    await UserModel.updateMany(
+      {
+        _id: { $in: users.map((u) => u._id) },
+        fcmTokens: { $in: invalidTokens },
+      },
+      { $pull: { fcmTokens: { $in: invalidTokens } } },
+    );
+  }
+};
+
+// offerBanner: true banner er jonno sudhu role "USER" ra pabe (ADMIN / STORE pabe na)
+const notifyUsersNewOffer = async (banner) => {
+  try {
+    const store = await StoreModel.findById(banner.storeId)
+      .select("storeName")
+      .lean();
+
+    const title = "New Offer 🎁";
+    const body = store?.storeName
+      ? `${store.storeName}: ${banner.name}`
+      : banner.name;
+
+    const { mediaUrl, mediaType } = getBannerMedia(banner);
+
+    const cursor = UserModel.find({ role: "USER" })
+      .select("_id fcmTokens")
+      .lean()
+      .cursor();
+
+    let batch = [];
+    const flush = async () => {
+      if (!batch.length) return;
+      const users = batch;
+      batch = [];
+      try {
+        await sendOfferToUserBatch({
+          users,
+          banner,
+          title,
+          body,
+          mediaUrl,
+          mediaType,
+        });
+      } catch (err) {
+        // ekta batch fail korle baki batch gulo jeno atke na jay
+        console.error("notifyUsersNewOffer batch error:", err);
+      }
+    };
+
+    for await (const user of cursor) {
+      batch.push(user);
+      if (batch.length >= USER_BATCH_SIZE) await flush();
+    }
+    await flush();
+  } catch (err) {
+    console.error("notifyUsersNewOffer error:", err);
+  }
+};
+
 module.exports = {
   notifyNewOrder,
   notifyOrderCancelled,
   notifyUserOrderStatus,
+  notifyUsersNewOffer,
 };

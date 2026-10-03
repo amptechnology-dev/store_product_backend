@@ -9,6 +9,7 @@ const NOTIFICATION_TYPES = [
   "ORDER_CONFIRMED",
   "ORDER_SHIPPED",
   "ORDER_DELIVERED",
+  "NEW_OFFER",
 ];
 
 const notificationSchema = new mongoose.Schema(
@@ -32,6 +33,11 @@ const notificationSchema = new mongoose.Schema(
     title: { type: String, required: true },
     body: { type: String, required: true },
     orderId: { type: mongoose.Schema.Types.ObjectId, ref: "Order" },
+    // NEW_OFFER notification er jonno
+    bannerId: { type: mongoose.Schema.Types.ObjectId, ref: "Banner" },
+    // notification e dekhanor media (banner er image / gif / video)
+    mediaUrl: { type: String, default: null },
+    mediaType: { type: String, enum: ["image", "video", null], default: null },
     isRead: { type: Boolean, default: false },
   },
   { timestamps: true },

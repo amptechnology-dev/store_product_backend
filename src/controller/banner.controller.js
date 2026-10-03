@@ -9,10 +9,13 @@ const {
   updateBannerSchema,
 } = require("../schema/banner.schema.js");
 const { uploadBannerMedia } = require("../helper/productImages.js");
+const { notifyUsersNewOffer } = require("../helper/notification.helper.js");
 
 const getUserId = (req) => req.user?._id || req.user?.id;
 
 const escapeRegex = (str = "") => str.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+const uniqueIds = (ids = []) => [...new Set(ids.map(String))];
 
 const handleError = (res, error, label) => {
   console.error(`${label}:`, error);
@@ -50,13 +53,18 @@ const handleError = (res, error, label) => {
     .json({ success: false, message: "Internal server error" });
 };
 
-// category ta ei store er kina check (banner e onno store er category dewa jabe na)
-const categoryBelongsToStore = (categoryId, storeId) =>
-  CategoryModel.exists({ _id: categoryId, storeId });
+// shob category ei store er kina check (onno store er category dewa jabe na)
+const categoriesBelongToStore = async (categoryIds, storeId) => {
+  const count = await CategoryModel.countDocuments({
+    _id: { $in: categoryIds },
+    storeId,
+  });
+  return count === categoryIds.length;
+};
 
-// product ta ei store er kina check, ar category dile product oi category r kina
+// product ta ei store er kina check, ar category dile product oi category gulor kono ekta te kina
 // error message return kore, sob thik thakle null
-const validateProductLink = async ({ productId, categoryId, storeId }) => {
+const validateProductLink = async ({ productId, categoryIds, storeId }) => {
   if (!productId) return null;
 
   const product = await ProductModel.findOne({ _id: productId, storeId })
@@ -64,32 +72,40 @@ const validateProductLink = async ({ productId, categoryId, storeId }) => {
     .lean();
   if (!product) return "Product not found for this store";
 
-  if (categoryId && String(product.categoryId) !== String(categoryId)) {
-    return "Selected product does not belong to the selected category";
+  if (
+    categoryIds?.length &&
+    !categoryIds.map(String).includes(String(product.categoryId))
+  ) {
+    return "Selected product does not belong to the selected categories";
   }
   return null;
 };
 
 const BANNER_POPULATE = [
   { path: "storeId", select: "storeName storeUniqueId" },
-  { path: "categoryId", select: "name" },
+  { path: "categoryIds", select: "name" },
   { path: "productId", select: "name productCode images" },
 ];
 
 // ===================== STORE (authenticated) =====================
 
-// form er product dropdown er jonno: ei store er product (category dile shudhu oi category r)
+// form er product dropdown er jonno: ei store er product (category dile shudhu oi category gulor)
+// query: storeId, categoryIds (comma separated)
 const getProductOptions = async (req, res) => {
   try {
     const userId = getUserId(req);
-    const { storeId, categoryId } = req.query;
+    const { storeId } = req.query;
+    const categoryIds = String(req.query.categoryIds || "")
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean);
 
     if (!mongoose.isValidObjectId(storeId)) {
       return res
         .status(400)
         .json({ success: false, message: "Invalid store id" });
     }
-    if (categoryId && !mongoose.isValidObjectId(categoryId)) {
+    if (categoryIds.some((id) => !mongoose.isValidObjectId(id))) {
       return res
         .status(400)
         .json({ success: false, message: "Invalid category id" });
@@ -104,7 +120,7 @@ const getProductOptions = async (req, res) => {
     }
 
     const filter = { storeId };
-    if (categoryId) filter.categoryId = categoryId;
+    if (categoryIds.length) filter.categoryId = { $in: categoryIds };
 
     const products = await ProductModel.find(filter)
       .select("name productCode categoryId")
@@ -148,16 +164,17 @@ const createBanner = async (req, res) => {
       });
     }
 
-    // categoryId optional, dile oi store er category hote hobe
-    if (parsedData.categoryId) {
-      const validCategory = await categoryBelongsToStore(
-        parsedData.categoryId,
+    // categoryIds optional, dile shob gulo oi store er category hote hobe
+    const categoryIds = uniqueIds(parsedData.categoryIds);
+    if (categoryIds.length) {
+      const valid = await categoriesBelongToStore(
+        categoryIds,
         parsedData.storeId,
       );
-      if (!validCategory) {
+      if (!valid) {
         return res.status(400).json({
           success: false,
-          message: "Category not found for this store",
+          message: "One or more categories not found for this store",
         });
       }
     }
@@ -165,7 +182,7 @@ const createBanner = async (req, res) => {
     // productId optional, dile oi store er product hote hobe
     const linkError = await validateProductLink({
       productId: parsedData.productId,
-      categoryId: parsedData.categoryId,
+      categoryIds,
       storeId: parsedData.storeId,
     });
     if (linkError) {
@@ -180,13 +197,20 @@ const createBanner = async (req, res) => {
     }
 
     const banner = await BannerModel.create({
-      ...parsedData,
-      categoryId: parsedData.categoryId || null,
+      name: parsedData.name,
+      storeId: parsedData.storeId,
+      categoryIds,
       productId: parsedData.productId || null,
+      offerBanner: parsedData.offerBanner ?? false,
       image: media.url,
       mediaType: media.mediaType,
       userId,
     });
+
+    // offer banner hole role USER der notification (fire-and-forget, response block korbe na)
+    if (banner.offerBanner && banner.isActive) {
+      notifyUsersNewOffer(banner);
+    }
 
     return res.status(201).json({
       success: true,
@@ -299,27 +323,32 @@ const updateBanner = async (req, res) => {
     // update e store change kora jabe na
     const { storeId, ...safeData } = parsedData;
 
-    const updateFields = { ...safeData };
-
-    // categoryId: undefined = change nai, null = remove, value = set (store check shoho)
-    if (safeData.categoryId === undefined) {
-      delete updateFields.categoryId;
-    } else if (safeData.categoryId) {
-      const validCategory = await categoryBelongsToStore(
-        safeData.categoryId,
-        existingBanner.storeId,
-      );
-      if (!validCategory) {
-        return res.status(400).json({
-          success: false,
-          message: "Category not found for this store",
-        });
-      }
+    // undefined = change nai, tai shudhu pathano field gulo-i set hobe
+    const updateFields = {};
+    if (safeData.name !== undefined) updateFields.name = safeData.name;
+    if (safeData.offerBanner !== undefined) {
+      updateFields.offerBanner = safeData.offerBanner;
+    }
+    if (safeData.productId !== undefined) {
+      updateFields.productId = safeData.productId; // null = remove
     }
 
-    // productId: undefined = change nai, null = remove, value = set
-    if (safeData.productId === undefined) {
-      delete updateFields.productId;
+    // categoryIds: undefined = change nai, [] = shob remove, [..] = set (store check shoho)
+    if (safeData.categoryIds !== undefined) {
+      const newCategoryIds = uniqueIds(safeData.categoryIds);
+      if (newCategoryIds.length) {
+        const valid = await categoriesBelongToStore(
+          newCategoryIds,
+          existingBanner.storeId,
+        );
+        if (!valid) {
+          return res.status(400).json({
+            success: false,
+            message: "One or more categories not found for this store",
+          });
+        }
+      }
+      updateFields.categoryIds = newCategoryIds;
     }
 
     // product ba category change hole, final (effective) combination ta valid kina check
@@ -327,18 +356,16 @@ const updateBanner = async (req, res) => {
       safeData.productId === undefined
         ? existingBanner.productId
         : safeData.productId;
-    const effectiveCategoryId =
-      safeData.categoryId === undefined
-        ? existingBanner.categoryId
-        : safeData.categoryId;
+    const effectiveCategoryIds =
+      updateFields.categoryIds ?? existingBanner.categoryIds.map(String);
 
     if (
       effectiveProductId &&
-      (safeData.productId !== undefined || safeData.categoryId !== undefined)
+      (safeData.productId !== undefined || safeData.categoryIds !== undefined)
     ) {
       const linkError = await validateProductLink({
         productId: effectiveProductId,
-        categoryId: effectiveCategoryId,
+        categoryIds: effectiveCategoryIds,
         storeId: existingBanner.storeId,
       });
       if (linkError) {
@@ -358,6 +385,13 @@ const updateBanner = async (req, res) => {
       { $set: updateFields },
       { returnDocument: "after", runValidators: true },
     );
+
+    // offer banner false -> true hole-i notification (shadharon edit e abar jabe na)
+    const turnedOffer =
+      updateFields.offerBanner === true && !existingBanner.offerBanner;
+    if (turnedOffer && updatedBanner?.isActive) {
+      notifyUsersNewOffer(updatedBanner);
+    }
 
     return res.status(200).json({
       success: true,
@@ -416,6 +450,43 @@ const publicGetAllBanners = async (req, res) => {
   }
 };
 
+// shudhu offer banner (offerBanner: true + active)
+// GET /api/banner/public/offer-banners?storeId=&categoryId=
+const publicGetOfferBanners = async (req, res) => {
+  try {
+    const { storeId, categoryId } = req.query;
+
+    if (storeId && !mongoose.isValidObjectId(storeId)) {
+      return res
+        .status(400)
+        .json({ success: false, message: "Invalid store id" });
+    }
+    if (categoryId && !mongoose.isValidObjectId(categoryId)) {
+      return res
+        .status(400)
+        .json({ success: false, message: "Invalid category id" });
+    }
+
+    const filter = { isActive: true, offerBanner: true };
+    if (storeId) filter.storeId = storeId;
+    if (categoryId) filter.categoryIds = categoryId;
+
+    const banners = await BannerModel.find(filter)
+      .populate(BANNER_POPULATE)
+      .sort({ createdAt: -1 })
+      .limit(100)
+      .select("-userId -__v");
+
+    return res.status(200).json({
+      success: true,
+      count: banners.length,
+      banners,
+    });
+  } catch (error) {
+    return handleError(res, error, "Public Get Offer Banners Error");
+  }
+};
+
 const publicGetBannersByCategory = async (req, res) => {
   try {
     const { categoryId } = req.params;
@@ -435,8 +506,12 @@ const publicGetBannersByCategory = async (req, res) => {
     const filter = { isActive: true };
     if (storeId) filter.storeId = storeId;
 
-    filter.categoryId =
-      includeGeneral === "true" ? { $in: [categoryId, null] } : categoryId;
+    // includeGeneral=true hole category-less (categoryIds khali) banner o ashbe
+    if (includeGeneral === "true") {
+      filter.$or = [{ categoryIds: categoryId }, { categoryIds: { $size: 0 } }];
+    } else {
+      filter.categoryIds = categoryId;
+    }
 
     const banners = await BannerModel.find(filter)
       .populate(BANNER_POPULATE)
@@ -461,5 +536,6 @@ module.exports = {
   updateBanner,
   deleteBanner,
   publicGetAllBanners,
+  publicGetOfferBanners,
   publicGetBannersByCategory,
 };
