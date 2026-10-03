@@ -49,8 +49,46 @@ const loginSchema = z.object({
   password: z.string().min(6, "Password is required"),
 });
 
+const emailField = z
+  .string()
+  .trim()
+  .toLowerCase()
+  .email("Valid email is required");
+
+const sendOtpSchema = z.object({
+  email: emailField,
+});
+
+const verifyOtpSchema = z.object({
+  email: emailField,
+  otp: z
+    .string()
+    .trim()
+    .regex(/^\d{6}$/, "OTP must be 6 digits"),
+});
+
+const resetPasswordSchema = z
+  .object({
+    resetToken: z.string().min(1, "Reset token is required"),
+    password: z.string().min(8, "Password must be at least 8 characters"),
+    confirmPassword: z.string().min(1, "Confirm password is required"),
+  })
+  .refine((d) => d.password === d.confirmPassword, {
+    message: "Passwords do not match",
+    path: ["confirmPassword"],
+  });
+
+const loginWithOtpSchema = z.object({
+  resetToken: z.string().min(1, "Reset token is required"),
+});
+
 module.exports = {
   createUserSchema,
   updateUserSchema,
   loginSchema,
+  emailField,
+  sendOtpSchema,
+  verifyOtpSchema,
+  resetPasswordSchema,
+  loginWithOtpSchema,
 };
