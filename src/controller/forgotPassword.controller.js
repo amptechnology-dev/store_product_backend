@@ -120,7 +120,7 @@ const consumeResetToken = async (resetToken) => {
 // POST /forgot-password/send-otp   body: { email }
 const sendForgotPasswordOtp = async (req, res) => {
   try {
-    const { email } = sendOtpSchema.parse(req.body);
+    const { email, role } = sendOtpSchema.parse(req.body);
 
     // email registered ki na, seta jeno bahire theke bojha na jay
     const genericResponse = {
@@ -128,7 +128,7 @@ const sendForgotPasswordOtp = async (req, res) => {
       message: "If this email is registered, an OTP has been sent.",
     };
 
-    const user = await UserModel.findOne({ email });
+    const user = await UserModel.findOne({ email, role });
     if (!user) return res.status(200).json(genericResponse);
 
     // resend cooldown
@@ -197,7 +197,7 @@ const sendForgotPasswordOtp = async (req, res) => {
 // POST /forgot-password/verify-otp   body: { email, otp }
 const verifyForgotPasswordOtp = async (req, res) => {
   try {
-    const { email, otp } = verifyOtpSchema.parse(req.body);
+    const { email, otp, role } = verifyOtpSchema.parse(req.body);
 
     const invalidResponse = () =>
       res.status(400).json({
@@ -205,7 +205,7 @@ const verifyForgotPasswordOtp = async (req, res) => {
         message: "Invalid or expired OTP",
       });
 
-    const user = await UserModel.findOne({ email });
+    const user = await UserModel.findOne({ email, role });
     if (!user) return invalidResponse();
 
     // attempt count atomically barao, tarpor check koro (parallel guess rokhe)

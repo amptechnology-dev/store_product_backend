@@ -16,7 +16,8 @@ const addressSchema = new mongoose.Schema(
 const userSchema = new mongoose.Schema(
   {
     name: { type: String, required: true },
-    email: { type: String, required: true, unique: true, lowercase: true },
+    // unique: true shoriye deya hoyeche, uniqueness ekhon (email + role) index e
+    email: { type: String, required: true, lowercase: true, trim: true },
     phone: { type: String },
     password: { type: String },
     role: {
@@ -38,6 +39,9 @@ const userSchema = new mongoose.Schema(
   },
   { timestamps: true },
 );
+
+// ekta email, ekta role e ekbar-i. Alada role e same email cholbe.
+userSchema.index({ email: 1, role: 1 }, { unique: true });
 
 const UserModel = model("User", userSchema);
 

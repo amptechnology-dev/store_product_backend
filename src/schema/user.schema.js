@@ -55,12 +55,16 @@ const emailField = z
   .toLowerCase()
   .email("Valid email is required");
 
+const roleField = z.enum(["ADMIN", "STORE", "USER"]);
+
 const sendOtpSchema = z.object({
   email: emailField,
+  role: roleField,
 });
 
 const verifyOtpSchema = z.object({
   email: emailField,
+  role: roleField,
   otp: z
     .string()
     .trim()

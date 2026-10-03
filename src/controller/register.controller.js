@@ -24,27 +24,93 @@ const {
   buildResponseUser,
 } = require("../helper/authToken");
 
-const toNumberOrUndefined = (value) => {
-  if (value === undefined || value === null || value === "") return undefined;
-  const num = Number(value);
-  return Number.isFinite(num) ? num : undefined;
+const normalizeEmail = (email) => String(email || "").trim().toLowerCase();
+
+// is this email already registered under this role
+const accountExists = (email, role) =>
+  UserModel.exists({ email: normalizeEmail(email), role });
+
+const roleConflict = (res, role) =>
+  res.status(409).json({
+    success: false,
+    message: `This email is already registered as ${role}`,
+  });
+
+// returns true (and sends the response) when a required field is missing
+const missingField = (res, fields) => {
+  for (const [label, value] of fields) {
+    if (value === undefined || value === null || String(value).trim() === "") {
+      res.status(400).json({ success: false, message: `${label} is required` });
+      return true;
+    }
+  }
+  return false;
 };
 
-// trim kore, empty string hole undefined return kore
-const clean = (value) => {
-  const trimmed = typeof value === "string" ? value.trim() : value;
-  return trimmed === "" ? undefined : trimmed;
+const DUPLICATE_FIELD_LABELS = {
+  email: "Email",
+  phone: "Phone number",
+  storeUniqueId: "Store ID",
+  gstin: "GSTIN",
+};
+
+// one place that turns any registration error into a specific message
+const sendRegisterError = (res, error, { role, label }) => {
+  if (error.name === "ZodError") {
+    const errors = error.issues.map((err) => ({
+      field: err.path.join("."),
+      message: err.message,
+    }));
+    return res.status(400).json({
+      success: false,
+      message: errors[0]?.message || "Validation failed",
+      errors,
+    });
+  }
+
+  if (error.name === "ValidationError") {
+    const errors = Object.values(error.errors).map((e) => ({
+      field: e.path,
+      message: e.message,
+    }));
+    return res.status(400).json({
+      success: false,
+      message: errors[0]?.message || "Validation failed",
+      errors,
+    });
+  }
+
+  if (error.code === 11000) {
+    const keys = Object.keys(error.keyPattern || {});
+    if (keys.includes("email") && keys.includes("role")) {
+      return roleConflict(res, role);
+    }
+    const field = keys[0];
+    return res.status(409).json({
+      success: false,
+      message: `${DUPLICATE_FIELD_LABELS[field] || field || "Value"} already exists`,
+    });
+  }
+
+  if (error.name === "CastError") {
+    return res
+      .status(400)
+      .json({ success: false, message: `Invalid value for ${error.path}` });
+  }
+
+  console.error(`${label}:`, error);
+  return res
+    .status(500)
+    .json({ success: false, message: "Internal server error" });
 };
 
 const registerAdmin = async (req, res) => {
   try {
     const parsedData = createUserSchema.parse(req.body);
+    const email = normalizeEmail(parsedData.email);
 
-    const existingEmail = await UserModel.findOne({ email: parsedData.email });
-    if (existingEmail) {
-      return res.status(409).json({
-        message: "Email already in use",
-      });
+    if (await accountExists(email, "ADMIN")) {
+      return roleConflict(res, "ADMIN");
     }
 
     const salt = await bcrypt.genSalt(10);
@@ -52,38 +118,34 @@ const registerAdmin = async (req, res) => {
 
     const user = new UserModel({
       ...parsedData,
+      email,
       password: hashedPassword,
       role: "ADMIN",
       isVerified: true,
     });
-
     await user.save();
 
-    await sendPasswordEmail(parsedData.email, parsedData.password);
-    // await sendPasswordSMS(parsedData.phone, parsedData.email, parsedData.password);
+    let emailSent = true;
+    try {
+      await sendPasswordEmail(email, parsedData.password);
+      // await sendPasswordSMS(parsedData.phone, email, parsedData.password);
+    } catch (mailError) {
+      emailSent = false;
+      console.error("Admin password email error:", mailError);
+    }
 
+    const { password: _password, ...safeUser } = user.toObject();
     return res.status(201).json({
-      message: "Super Admin Register Successfully",
-      user,
+      success: true,
+      message: emailSent
+        ? "Super Admin Register Successfully"
+        : "Super Admin registered, but the password email could not be sent",
+      user: safeUser,
     });
   } catch (error) {
-    if (error.code === 11000 && error.keyPattern?.email) {
-      return res.status(409).json({
-        message: "Email already in use",
-      });
-    }
-
-    if (error.name === "ZodError") {
-      return res.status(400).json({
-        message: "Validation failed",
-        errors: error.errors,
-      });
-    }
-
-    console.error("Admin registration error:", error);
-
-    return res.status(500).json({
-      message: "Internal server error",
+    return sendRegisterError(res, error, {
+      role: "ADMIN",
+      label: "Admin registration error",
     });
   }
 };
@@ -91,66 +153,95 @@ const registerAdmin = async (req, res) => {
 const registerOwner = async (req, res) => {
   try {
     const parsedData = createUserSchema.parse(req.body);
-    const existingEmail = await UserModel.findOne({ email: parsedData.email });
-    if (existingEmail) {
-      return res.status(409).json({
-        message: "Email already in use",
-      });
+    const email = normalizeEmail(parsedData.email);
+
+    if (await accountExists(email, "STORE")) {
+      return roleConflict(res, "STORE");
     }
+
     const salt = await bcrypt.genSalt(10);
     const hashedPassword = await bcrypt.hash(parsedData.password, salt);
+
     const user = new UserModel({
       ...parsedData,
+      email,
       password: hashedPassword,
       role: "STORE",
     });
     await user.save();
-    const userId = user._id;
-    sendEmailVerificationOTP(req, user);
+
+    let otpSent = true;
+    try {
+      await sendEmailVerificationOTP(req, user);
+    } catch (mailError) {
+      otpSent = false;
+      console.error("Verification OTP email error:", mailError);
+    }
+
+    const { password: _password, ...safeUser } = user.toObject();
     return res.status(201).json({
-      message:
-        "Store owner registered and verification email sent successfully !",
-      user,
+      success: true,
+      message: otpSent
+        ? "Store owner registered and verification email sent successfully!"
+        : "Store owner registered, but the verification email could not be sent. Please try again later.",
+      user: safeUser,
     });
   } catch (error) {
-    if (error.code === 11000 && error.keyPattern?.email) {
-      return res.status(409).json({
-        message: "Email already in use",
-      });
-    }
-    if (error.name === "ZodError") {
-      return res.status(400).json({
-        message: "Validation failed",
-        errors: error.errors,
-      });
-    }
-    console.error("Store owner registration error:", error);
-    return res.status(500).json({
-      message: "Internal server error",
+    return sendRegisterError(res, error, {
+      role: "STORE",
+      label: "Store owner registration error",
     });
   }
 };
 
 const verifyEmailOTP = async (req, res) => {
   try {
-    const { email, otp } = req.body;
+    const { email, otp, role } = req.body;
     if (!email || !otp) {
       return res
         .status(400)
         .json({ status: false, message: "All fields are required" });
     }
-    const normalizedEmail = email.trim().toLowerCase();
-    const existingUser = await UserModel.findOne({ email: normalizedEmail });
-    if (!existingUser) {
+
+    const normalizedEmail = normalizeEmail(email);
+    const normalizedRole = role ? String(role).trim().toUpperCase() : null;
+
+    if (normalizedRole && !["ADMIN", "STORE", "USER"].includes(normalizedRole)) {
+      return res.status(400).json({ status: false, message: "Invalid role" });
+    }
+
+    const accounts = await UserModel.find(
+      normalizedRole
+        ? { email: normalizedEmail, role: normalizedRole }
+        : { email: normalizedEmail },
+    );
+    if (!accounts.length) {
       return res
         .status(404)
         .json({ status: false, message: "Email doesn't exist" });
     }
+
+    let existingUser;
+    if (accounts.length === 1) {
+      existingUser = accounts[0];
+    } else {
+      const unverified = accounts.filter((a) => !a.isVerified);
+      if (unverified.length === 1) {
+        existingUser = unverified[0];
+      } else {
+        return res.status(400).json({
+          status: false,
+          message: "Multiple accounts found for this email. Please send role.",
+        });
+      }
+    }
+
     if (existingUser.isVerified) {
       return res
         .status(400)
         .json({ status: false, message: "Email is already verified" });
     }
+
     const emailVerification = await EmailVerifyModel.findOne({
       userId: existingUser._id,
       otp: String(otp).trim(),
@@ -162,6 +253,7 @@ const verifyEmailOTP = async (req, res) => {
         message: "Invalid OTP, new OTP sent to your email",
       });
     }
+
     const expirationTime =
       emailVerification.createdAt.getTime() + 15 * 60 * 1000;
     if (Date.now() > expirationTime) {
@@ -171,11 +263,14 @@ const verifyEmailOTP = async (req, res) => {
         message: "OTP expired, new OTP sent to your email",
       });
     }
+
     existingUser.isVerified = true;
     await existingUser.save();
     await EmailVerifyModel.deleteMany({ userId: existingUser._id });
+
     const token = generateAuthToken(existingUser);
     setAuthCookie(res, token);
+
     return res.status(200).json({
       status: true,
       message: "Email verified successfully",
@@ -191,8 +286,8 @@ const verifyEmailOTP = async (req, res) => {
   }
 };
 
-// Register Store Owner with Store Details
 const registerStoreOwner = async (req, res) => {
+  let user;
   try {
     const {
       name,
@@ -212,36 +307,41 @@ const registerStoreOwner = async (req, res) => {
       long,
     } = req.body;
 
-    const existingUser = await UserModel.findOne({ email });
+    if (
+      missingField(res, [
+        ["Name", name],
+        ["Email", email],
+        ["Password", password],
+      ])
+    ) {
+      return;
+    }
 
-    if (existingUser) {
-      return res.status(400).json({
-        message: "User already exists with this email",
-      });
+    const normalizedEmail = normalizeEmail(email);
+
+    if (await accountExists(normalizedEmail, "STORE")) {
+      return roleConflict(res, "STORE");
     }
 
     const salt = await bcrypt.genSalt(10);
-    const hashedPassword = await bcrypt.hash(password.trim(), salt);
+    const hashedPassword = await bcrypt.hash(String(password).trim(), salt);
 
-    const user = await UserModel.create({
-      name: name?.trim(),
-      email: email?.trim(),
+    user = await UserModel.create({
+      name: name.trim(),
+      email: normalizedEmail,
       phone: phone?.trim(),
       password: hashedPassword,
       role: "STORE",
     });
 
     /* IMAGE UPLOAD */
-
     let images = [];
 
     if (req.files?.length) {
       for (const file of req.files) {
         if (file.fieldname.startsWith("image")) {
           const fileName = `amp-store/${Date.now()}-${file.originalname}`;
-
           const url = await uploadToR2(file.buffer, fileName, file.mimetype);
-
           images.push(url);
         }
       }
@@ -257,7 +357,7 @@ const registerStoreOwner = async (req, res) => {
       contactNo: contactNo?.trim(),
       whatsappNo: whatsappNo?.trim(),
 
-      email: email?.trim(),
+      email: normalizedEmail,
       website: website?.trim(),
 
       gstin: gstin?.trim(),
@@ -293,11 +393,19 @@ const registerStoreOwner = async (req, res) => {
       userId: user._id,
     });
 
-    await sendPasswordEmail(req.body.email, req.body.password);
+    let emailSent = true;
+    try {
+      await sendPasswordEmail(normalizedEmail, password);
+    } catch (mailError) {
+      emailSent = false;
+      console.error("Store owner password email error:", mailError);
+    }
 
     return res.status(201).json({
-      message:
-        "Your store registration is successful. Please wait for admin verification.",
+      success: true,
+      message: emailSent
+        ? "Your store registration is successful. Please wait for admin verification."
+        : "Your store registration is successful, but the email could not be sent. Please wait for admin verification.",
       user: {
         ...user.toObject(),
         password: undefined,
@@ -305,16 +413,21 @@ const registerStoreOwner = async (req, res) => {
       store,
     });
   } catch (error) {
-    console.error("User creation error:", error);
+    // store create failed, remove the orphan user
+    if (user?._id) {
+      await UserModel.findByIdAndDelete(user._id).catch(() => {});
+    }
 
-    return res.status(500).json({
-      message: "Internal server error",
+    return sendRegisterError(res, error, {
+      role: "STORE",
+      label: "Store owner registration error",
     });
   }
 };
 
 const createUser = async (req, res) => {
   let user;
+  let store;
   try {
     const {
       name,
@@ -332,20 +445,28 @@ const createUser = async (req, res) => {
       long,
     } = req.body;
 
-    const existingUser = await UserModel.findOne({ email });
+    if (
+      missingField(res, [
+        ["Name", name],
+        ["Email", email],
+        ["Password", password],
+      ])
+    ) {
+      return;
+    }
 
-    if (existingUser) {
-      return res.status(400).json({
-        message: "User already exists with this email",
-      });
+    const normalizedEmail = normalizeEmail(email);
+
+    if (await accountExists(normalizedEmail, "STORE")) {
+      return roleConflict(res, "STORE");
     }
 
     const salt = await bcrypt.genSalt(10);
-    const hashedPassword = await bcrypt.hash(password.trim(), salt);
+    const hashedPassword = await bcrypt.hash(String(password).trim(), salt);
 
     user = await UserModel.create({
-      name: name?.trim(),
-      email: email?.trim(),
+      name: name.trim(),
+      email: normalizedEmail,
       phone: phone?.trim(),
       password: hashedPassword,
       role: "STORE",
@@ -365,7 +486,7 @@ const createUser = async (req, res) => {
       }
     }
 
-    const store = await StoreModel.create({
+    store = await StoreModel.create({
       storeName: clean(storeName),
       storeType: clean(storeType),
       description: clean(description),
@@ -374,7 +495,7 @@ const createUser = async (req, res) => {
       whatsappNo: clean(whatsappNo),
       supportNo: clean(supportNo),
 
-      email: clean(email),
+      email: normalizedEmail,
       gstin: clean(gstin),
 
       lat: toNumberOrUndefined(lat),
@@ -400,15 +521,27 @@ const createUser = async (req, res) => {
       userId: user._id,
       isVerify: true,
     });
-    await sendStoreCredentialsEmail({
-      toEmail: user.email,
-      ownerName: user.name,
-      storeName: store.storeName,
-      storeUniqueId: store.storeUniqueId,
-      password: password.trim(),
-    });
+
+    // user + store are saved at this point, so a mail failure must not roll them back
+    let emailSent = true;
+    try {
+      await sendStoreCredentialsEmail({
+        toEmail: user.email,
+        ownerName: user.name,
+        storeName: store.storeName,
+        storeUniqueId: store.storeUniqueId,
+        password: String(password).trim(),
+      });
+    } catch (mailError) {
+      emailSent = false;
+      console.error("Store credentials email error:", mailError);
+    }
+
     return res.status(201).json({
-      message: "User and store created successfully",
+      success: true,
+      message: emailSent
+        ? "User and store created successfully"
+        : "User and store created, but the credentials email could not be sent",
       user: {
         ...user.toObject(),
         password: undefined,
@@ -416,15 +549,14 @@ const createUser = async (req, res) => {
       store,
     });
   } catch (error) {
-    // store create fail hole orphan user delete kore dao
-    if (user?._id) {
+    // store create failed, remove the orphan user
+    if (user?._id && !store) {
       await UserModel.findByIdAndDelete(user._id).catch(() => {});
     }
 
-    console.log("User creation error:", error);
-
-    return res.status(500).json({
-      message: "Internal server error",
+    return sendRegisterError(res, error, {
+      role: "STORE",
+      label: "User creation error",
     });
   }
 };
@@ -1345,13 +1477,12 @@ const nearbyStores = async (req, res) => {
 const registerUser = async (req, res) => {
   try {
     const parsedData = createUserSchema.parse(req.body);
-    const email = parsedData.email.trim().toLowerCase();
-    const existingUser = await UserModel.findOne({ email });
-    if (existingUser) {
-      return res
-        .status(409)
-        .json({ success: false, message: "Email already in use" });
+    const email = normalizeEmail(parsedData.email);
+
+    if (await accountExists(email, "USER")) {
+      return roleConflict(res, "USER");
     }
+
     const hashedPassword = await bcrypt.hash(parsedData.password, 10);
     const user = await UserModel.create({
       name: parsedData.name.trim(),
@@ -1363,6 +1494,7 @@ const registerUser = async (req, res) => {
       isVerified: false,
       address: parsedData.address,
     });
+
     let otpSent = true;
     try {
       await sendEmailVerificationOTP(req, user);
@@ -1370,6 +1502,7 @@ const registerUser = async (req, res) => {
       otpSent = false;
       console.error("Verification OTP email error:", mailError);
     }
+
     const { password: _password, ...safeUser } = user.toObject();
     return res.status(201).json({
       success: true,
@@ -1379,35 +1512,10 @@ const registerUser = async (req, res) => {
       user: safeUser,
     });
   } catch (error) {
-    if (error.name === "ZodError") {
-      return res.status(400).json({
-        success: false,
-        message: "Validation failed",
-        errors: error.issues.map((err) => ({
-          field: err.path.join("."),
-          message: err.message,
-        })),
-      });
-    }
-    if (error.name === "ValidationError") {
-      return res.status(400).json({
-        success: false,
-        message: "Validation failed",
-        errors: Object.values(error.errors).map((e) => ({
-          field: e.path,
-          message: e.message,
-        })),
-      });
-    }
-    if (error.code === 11000 && error.keyPattern?.email) {
-      return res
-        .status(409)
-        .json({ success: false, message: "Email already in use" });
-    }
-    console.error("User registration error:", error);
-    return res
-      .status(500)
-      .json({ success: false, message: "Internal server error" });
+    return sendRegisterError(res, error, {
+      role: "USER",
+      label: "User registration error",
+    });
   }
 };
 

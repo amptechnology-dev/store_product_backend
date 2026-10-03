@@ -35,7 +35,7 @@ const continueWithGoogle = async (req, res) => {
 
     const { sub, email, name, picture } = payload;
 
-    let user = await UserModel.findOne({ email });
+    let user = await UserModel.findOne({ email, role: "USER" });
 
     if (!user) {
       user = await UserModel.create({
@@ -89,25 +89,105 @@ const continueWithGoogle = async (req, res) => {
   }
 };
 
+const ROLES = ["ADMIN", "STORE", "USER"];
+const ROLE_LABELS = { ADMIN: "Admin", STORE: "Store", USER: "User" };
+
 const login = async (req, res) => {
   try {
     const parsedData = loginSchema.parse(req.body);
-    const user = await UserModel.findOne({
-      email: parsedData.email.trim().toLowerCase(),
-    });
+    const email = parsedData.email.trim().toLowerCase();
 
-    if (!user) {
-      return res.status(404).json({ message: "User not found" });
+    // loginSchema may strip unknown keys, so role / allowedRoles are read from req.body
+    const role =
+      typeof req.body.role === "string"
+        ? req.body.role.trim().toUpperCase()
+        : null;
+
+    if (role && !ROLES.includes(role)) {
+      return res.status(400).json({ success: false, message: "Invalid role" });
     }
-    if (!user.isVerified) {
+
+    // the calling app can restrict which roles may sign in (web portal: ADMIN + STORE)
+    let allowedRoles = ROLES;
+    if (Array.isArray(req.body.allowedRoles) && req.body.allowedRoles.length) {
+      allowedRoles = req.body.allowedRoles
+        .map((r) => String(r).trim().toUpperCase())
+        .filter((r) => ROLES.includes(r));
+
+      if (!allowedRoles.length) {
+        return res
+          .status(400)
+          .json({ success: false, message: "Invalid allowed roles" });
+      }
+    }
+
+    if (role && !allowedRoles.includes(role)) {
+      return res.status(403).json({
+        success: false,
+        message: `${ROLE_LABELS[role]} accounts cannot sign in here`,
+      });
+    }
+
+    const allAccounts = await UserModel.find({ email });
+    if (!allAccounts.length) {
+      return res
+        .status(404)
+        .json({ success: false, message: "Email not found" });
+    }
+
+    const accounts = allAccounts.filter((a) =>
+      role ? a.role === role : allowedRoles.includes(a.role),
+    );
+    if (!accounts.length) {
+      const label = role
+        ? ROLE_LABELS[role]
+        : allowedRoles.map((r) => ROLE_LABELS[r]).join(" or ");
+      return res.status(404).json({
+        success: false,
+        message: `This email is not registered as ${label}`,
+      });
+    }
+
+    const withPassword = accounts.filter((a) => a.password);
+    if (!withPassword.length) {
+      return res.status(400).json({
+        success: false,
+        message:
+          "This account was created with Google sign-in. Please continue with Google.",
+      });
+    }
+
+    // only accounts whose password matches are candidates
+    const matched = [];
+    for (const account of withPassword) {
+      if (await comparePassword(parsedData.password, account.password)) {
+        matched.push(account);
+      }
+    }
+
+    if (!matched.length) {
       return res
         .status(401)
-        .json({ status: false, message: "Your account is not verified" });
+        .json({ success: false, message: "Incorrect password" });
     }
 
-    const isMatch = await comparePassword(parsedData.password, user.password);
-    if (!isMatch) {
-      return res.status(401).json({ message: "Invalid credentials" });
+    if (matched.length > 1) {
+      return res.status(400).json({
+        success: false,
+        message: "Multiple accounts found for this email. Please select a role.",
+        requireRole: true,
+        roles: matched.map((a) => a.role),
+      });
+    }
+
+    const user = matched[0];
+
+    if (!user.isVerified) {
+      return res.status(401).json({
+        success: false,
+        status: false,
+        message: "Your account is not verified",
+      });
     }
 
     const token = generateAuthToken(user);
@@ -120,17 +200,20 @@ const login = async (req, res) => {
     });
   } catch (error) {
     if (error.name === "ZodError") {
+      const errors = error.issues.map((err) => ({
+        field: err.path.join("."),
+        message: err.message,
+      }));
       return res.status(400).json({
         success: false,
-        message: "Validation failed",
-        errors: error.issues.map((err) => ({
-          field: err.path.join("."),
-          message: err.message,
-        })),
+        message: errors[0]?.message || "Validation failed",
+        errors,
       });
     }
     console.error("Login error:", error);
-    return res.status(500).json({ message: "Error logging in user" });
+    return res
+      .status(500)
+      .json({ success: false, message: "Error logging in user" });
   }
 };
 
