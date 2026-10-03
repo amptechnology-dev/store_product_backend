@@ -36,7 +36,8 @@ const upsertCompanySchema = z
       .string()
       .trim()
       .regex(/^\+?[0-9]{10,15}$/, "Invalid phone number"),
-    companyEmail: z.string().trim().toLowerCase().email("Invalid email"),
+    // optional now (empty string clears it)
+    companyEmail: optionalEmail,
 
     whatsappNo: optionalPhone,
     supportPhone: optionalPhone,

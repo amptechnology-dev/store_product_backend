@@ -435,10 +435,14 @@ const deleteBanner = async (req, res) => {
 // ===================== PUBLIC =====================
 const publicGetAllBanners = async (req, res) => {
   try {
-    const banners = await BannerModel.find({ isActive: true })
+    const banners = await BannerModel.find({
+      isActive: true,
+      offerBanner: { $ne: true },
+    })
       .populate(BANNER_POPULATE)
       .sort({ createdAt: -1 })
-      .select("-userId -__v");
+      .select("-userId -__v")
+      .lean();
 
     return res.status(200).json({
       success: true,

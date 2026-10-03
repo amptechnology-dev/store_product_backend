@@ -12,7 +12,8 @@ const companySchema = new mongoose.Schema(
 
     companyName: { type: String, required: true, trim: true },
     companyPhone: { type: String, required: true, trim: true },
-    companyEmail: { type: String, required: true, trim: true, lowercase: true },
+    // optional now
+    companyEmail: { type: String, trim: true, lowercase: true },
 
     whatsappNo: { type: String, trim: true },
     supportPhone: { type: String, trim: true },
