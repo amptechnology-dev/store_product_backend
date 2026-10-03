@@ -10,6 +10,11 @@ const sendPasswordEmail = require("../helper/mail.service.js");
 const transporter = require("../helper/emailtransporter.js");
 const { comparePassword } = require("../helper/comparePassword.js");
 const { OAuth2Client } = require("google-auth-library");
+const {
+  generateAuthToken,
+  setAuthCookie,
+  buildResponseUser,
+} = require("../helper/authToken");
 
 const client = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
 
