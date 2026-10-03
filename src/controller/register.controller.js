@@ -26,6 +26,22 @@ const {
 
 const normalizeEmail = (email) => String(email || "").trim().toLowerCase();
 
+// trims a string, returns undefined for empty / null / undefined values
+const clean = (value) => {
+  if (value === undefined || value === null) return undefined;
+  const trimmed = String(value).trim();
+  return trimmed === "" ? undefined : trimmed;
+};
+
+// converts to a finite number, otherwise undefined (avoids saving NaN)
+const toNumberOrUndefined = (value) => {
+  if (value === undefined || value === null || String(value).trim() === "") {
+    return undefined;
+  }
+  const num = Number(value);
+  return Number.isFinite(num) ? num : undefined;
+};
+
 // is this email already registered under this role
 const accountExists = (email, role) =>
   UserModel.exists({ email: normalizeEmail(email), role });
@@ -329,7 +345,7 @@ const registerStoreOwner = async (req, res) => {
     user = await UserModel.create({
       name: name.trim(),
       email: normalizedEmail,
-      phone: phone?.trim(),
+      phone: clean(phone),
       password: hashedPassword,
       role: "STORE",
     });
@@ -348,22 +364,22 @@ const registerStoreOwner = async (req, res) => {
     }
 
     const store = await StoreModel.create({
-      storeName: storeName?.trim(),
-      storeType: storeType?.trim(),
-      categoryId: categoryId?.trim(),
-      subCategoryId: subCategoryId?.trim(),
-      description: description?.trim(),
+      storeName: clean(storeName),
+      storeType: clean(storeType),
+      categoryId: clean(categoryId),
+      subCategoryId: clean(subCategoryId),
+      description: clean(description),
 
-      contactNo: contactNo?.trim(),
-      whatsappNo: whatsappNo?.trim(),
+      contactNo: clean(contactNo),
+      whatsappNo: clean(whatsappNo),
 
       email: normalizedEmail,
-      website: website?.trim(),
+      website: clean(website),
 
-      gstin: gstin?.trim(),
+      gstin: clean(gstin),
 
-      lat: Number(lat),
-      long: Number(long),
+      lat: toNumberOrUndefined(lat),
+      long: toNumberOrUndefined(long),
 
       images,
 
@@ -436,10 +452,13 @@ const createUser = async (req, res) => {
       password,
       storeName,
       storeType,
+      categoryId,
+      subCategoryId,
       description,
       contactNo,
       whatsappNo,
       supportNo,
+      website,
       gstin,
       lat,
       long,
@@ -467,7 +486,7 @@ const createUser = async (req, res) => {
     user = await UserModel.create({
       name: name.trim(),
       email: normalizedEmail,
-      phone: phone?.trim(),
+      phone: clean(phone),
       password: hashedPassword,
       role: "STORE",
       isVerified: true,
@@ -489,6 +508,8 @@ const createUser = async (req, res) => {
     store = await StoreModel.create({
       storeName: clean(storeName),
       storeType: clean(storeType),
+      categoryId: clean(categoryId),
+      subCategoryId: clean(subCategoryId),
       description: clean(description),
 
       contactNo: clean(contactNo),
@@ -496,6 +517,7 @@ const createUser = async (req, res) => {
       supportNo: clean(supportNo),
 
       email: normalizedEmail,
+      website: clean(website),
       gstin: clean(gstin),
 
       lat: toNumberOrUndefined(lat),
@@ -508,6 +530,12 @@ const createUser = async (req, res) => {
         state: req.body?.address?.state,
         country: req.body?.address?.country,
       },
+
+      timing: {
+        open: req.body?.timing?.open,
+        close: req.body?.timing?.close,
+      },
+
       timingByDay: {
         sunday: req.body?.timingByDay?.sunday,
         monday: req.body?.timingByDay?.monday,
@@ -601,22 +629,22 @@ const createStore = async (req, res) => {
     }
 
     const store = await StoreModel.create({
-      storeName: storeName?.trim(),
-      storeType: storeType?.trim(),
-      categoryId: categoryId?.trim(),
-      subCategoryId: subCategoryId?.trim(),
-      description: description?.trim(),
+      storeName: clean(storeName),
+      storeType: clean(storeType),
+      categoryId: clean(categoryId),
+      subCategoryId: clean(subCategoryId),
+      description: clean(description),
 
-      contactNo: contactNo?.trim(),
-      whatsappNo: whatsappNo?.trim(),
+      contactNo: clean(contactNo),
+      whatsappNo: clean(whatsappNo),
 
       email: user.email,
-      website: website?.trim(),
+      website: clean(website),
 
-      gstin: gstin?.trim(),
+      gstin: clean(gstin),
 
-      lat: Number(lat),
-      long: Number(long),
+      lat: toNumberOrUndefined(lat),
+      long: toNumberOrUndefined(long),
 
       images,
 
@@ -649,16 +677,11 @@ const createStore = async (req, res) => {
     });
 
     return res.status(201).json({
-      message: "User and store created successfully",
+      message: "Store created successfully",
       user: {
         ...user.toObject(),
         password: undefined,
       },
-      store,
-    });
-
-    return res.status(201).json({
-      message: "Store created successfully",
       store,
     });
   } catch (error) {
