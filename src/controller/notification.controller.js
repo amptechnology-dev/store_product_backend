@@ -1,3 +1,4 @@
+const mongoose = require("mongoose");
 const NotificationModel = require("../model/notification.model.js");
 const StoreModel = require("../model/store.model.js");
 const UserModel = require("../model/user.model.js");
@@ -151,9 +152,61 @@ const markNotificationsRead = async (req, res) => {
   }
 };
 
+// DELETE /clear-all -> logged-in user/store er sob notification delete
+const clearAllNotifications = async (req, res) => {
+  try {
+    const scope = await getNotificationScope(req);
+    const result = await NotificationModel.deleteMany(scope);
+
+    return res.status(200).json({
+      success: true,
+      message: "All notifications cleared",
+      deletedCount: result.deletedCount,
+    });
+  } catch (error) {
+    console.error("clearAllNotifications:", error);
+    return res
+      .status(500)
+      .json({ success: false, message: "Internal server error" });
+  }
+};
+
+// DELETE /clear-single/:id -> ekta specific notification delete
+const clearSingleNotification = async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return res
+        .status(400)
+        .json({ success: false, message: "Invalid notification id" });
+    }
+
+    // scope diye filter korchi, jate onner notification delete na kora jay
+    const scope = await getNotificationScope(req);
+    const result = await NotificationModel.deleteOne({ _id: id, ...scope });
+
+    if (result.deletedCount === 0) {
+      return res
+        .status(404)
+        .json({ success: false, message: "Notification not found" });
+    }
+
+    return res
+      .status(200)
+      .json({ success: true, message: "Notification deleted" });
+  } catch (error) {
+    console.error("clearSingleNotification:", error);
+    return res
+      .status(500)
+      .json({ success: false, message: "Internal server error" });
+  }
+};
+
 module.exports = {
   saveFcmToken,
   removeFcmToken,
   getNotifications,
   markNotificationsRead,
+  clearAllNotifications,
+  clearSingleNotification,
 };

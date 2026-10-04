@@ -6,6 +6,8 @@ const {
   removeFcmToken,
   getNotifications,
   markNotificationsRead,
+  clearAllNotifications,
+  clearSingleNotification,
 } = require("../controller/notification.controller.js");
 
 router.post("/fcm-token", verifyJwt, authorize("STORE", "USER"), saveFcmToken);
@@ -21,6 +23,18 @@ router.patch(
   verifyJwt,
   authorize("STORE", "USER"),
   markNotificationsRead,
+);
+router.delete(
+  "/clear-all",
+  verifyJwt,
+  authorize("STORE", "USER"),
+  clearAllNotifications,
+);
+router.delete(
+  "/clear-single/:id",
+  verifyJwt,
+  authorize("STORE", "USER"),
+  clearSingleNotification,
 );
 
 module.exports = router;

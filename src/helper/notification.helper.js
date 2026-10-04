@@ -4,6 +4,7 @@ const {
 } = require("../config/firebase.admin.js");
 const StoreModel = require("../model/store.model.js");
 const NotificationModel = require("../model/notification.model.js");
+const StoreVisitModel = require("../model/storeVisit.model.js");
 const UserModel = require("../model/user.model.js");
 
 const INVALID_TOKEN_CODES = [
@@ -159,8 +160,8 @@ const notifyUserOrderStatus = async (order) => {
   }
 };
 
-// ===================== OFFER BANNER -> shob USER role er user =====================
-const USER_BATCH_SIZE = 500; 
+// ===================== OFFER BANNER -> shudhu oi store visit kora USER =====================
+const USER_BATCH_SIZE = 500;
 const FCM_BATCH_SIZE = 500;
 
 const VIDEO_URL_REGEX = /\.(mp4|webm|mov)(\?.*)?$/i;
@@ -250,7 +251,7 @@ const sendOfferToUserBatch = async ({
   }
 };
 
-// offerBanner: true banner er jonno sudhu role "USER" ra pabe (ADMIN / STORE pabe na)
+// offerBanner: true hole shudhu jara ei store visit korechhe (role USER, active) tara pabe
 const notifyUsersNewOffer = async (banner) => {
   try {
     const store = await StoreModel.findById(banner.storeId)
@@ -264,17 +265,25 @@ const notifyUsersNewOffer = async (banner) => {
 
     const { mediaUrl, mediaType } = getBannerMedia(banner);
 
-    const cursor = UserModel.find({ role: "USER" })
-      .select("_id fcmTokens")
+    // ei store er visit record gulo stream kora hocche
+    const visitCursor = StoreVisitModel.find({ storeId: banner.storeId })
+      .select("userId")
       .lean()
       .cursor();
 
-    let batch = [];
-    const flush = async () => {
-      if (!batch.length) return;
-      const users = batch;
-      batch = [];
+    const processBatch = async (userIds) => {
+      if (!userIds.length) return;
       try {
+        // visitor holeo role USER ar active hote hobe
+        const users = await UserModel.find({
+          _id: { $in: userIds },
+          role: "USER",
+          isActive: true,
+        })
+          .select("_id fcmTokens")
+          .lean();
+        if (!users.length) return;
+
         await sendOfferToUserBatch({
           users,
           banner,
@@ -289,11 +298,16 @@ const notifyUsersNewOffer = async (banner) => {
       }
     };
 
-    for await (const user of cursor) {
-      batch.push(user);
-      if (batch.length >= USER_BATCH_SIZE) await flush();
+    let userIds = [];
+    for await (const visit of visitCursor) {
+      userIds.push(visit.userId);
+      if (userIds.length >= USER_BATCH_SIZE) {
+        const current = userIds;
+        userIds = [];
+        await processBatch(current);
+      }
     }
-    await flush();
+    await processBatch(userIds);
   } catch (err) {
     console.error("notifyUsersNewOffer error:", err);
   }
