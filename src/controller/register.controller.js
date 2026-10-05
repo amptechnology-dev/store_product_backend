@@ -24,7 +24,12 @@ const {
   buildResponseUser,
 } = require("../helper/authToken");
 
-const normalizeEmail = (email) => String(email || "").trim().toLowerCase();
+const normalizeEmail = (email) =>
+  String(email || "")
+    .trim()
+    .toLowerCase();
+const toBool = (value) =>
+  value === true || String(value).trim().toLowerCase() === "true";
 
 // trims a string, returns undefined for empty / null / undefined values
 const clean = (value) => {
@@ -222,7 +227,10 @@ const verifyEmailOTP = async (req, res) => {
     const normalizedEmail = normalizeEmail(email);
     const normalizedRole = role ? String(role).trim().toUpperCase() : null;
 
-    if (normalizedRole && !["ADMIN", "STORE", "USER"].includes(normalizedRole)) {
+    if (
+      normalizedRole &&
+      !["ADMIN", "STORE", "USER"].includes(normalizedRole)
+    ) {
       return res.status(400).json({ status: false, message: "Invalid role" });
     }
 
@@ -548,6 +556,7 @@ const createUser = async (req, res) => {
 
       userId: user._id,
       isVerify: true,
+      isVisitor: toBool(req.body.isVisitor),
     });
 
     // user + store are saved at this point, so a mail failure must not roll them back
@@ -823,6 +832,7 @@ const singleStore = async (req, res) => {
           createdAt: 1,
           isVerify: 1,
           isActive: 1,
+          isVisitor: 1,
 
           owner: {
             _id: "$owner._id",
@@ -855,6 +865,7 @@ const singleStore = async (req, res) => {
 const updateStoreAndUser = async (req, res) => {
   try {
     const { storeId } = req.params;
+    const isAdmin = req.user?.role === "ADMIN";
 
     const store = await StoreModel.findById(storeId);
 
@@ -961,6 +972,10 @@ const updateStoreAndUser = async (req, res) => {
 
         isVerify: req.body.isVerify ?? store.isVerify,
         isActive: req.body.isActive ?? store.isActive,
+        isVisitor:
+          isAdmin && req.body.isVisitor !== undefined
+            ? toBool(req.body.isVisitor)
+            : Boolean(store.isVisitor),
       },
       { new: true },
     );

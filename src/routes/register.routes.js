@@ -42,6 +42,7 @@ router.get("/all-stores", allStores);
 router.get("/single-store/:storeId", verifyJwt, singleStore);
 router.put(
   "/update-store-and-user/:storeId",
+  verifyJwt,
   uploadMultiImages,
   updateStoreAndUser,
 );

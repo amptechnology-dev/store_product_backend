@@ -84,6 +84,10 @@ const storeSchema = new mongoose.Schema(
       type: Boolean,
       default: false,
     },
+    isVisitor: {
+      type: Boolean,
+      default: false,
+    },
     viewCount: {
       type: Number,
       default: 0,
