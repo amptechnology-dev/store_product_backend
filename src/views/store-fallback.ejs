@@ -9,10 +9,32 @@
     <% if (store.images && store.images[0]) { %>
     <meta property="og:image" content="<%= store.images[0] %>" />
     <% } %>
+    <style>
+      body { font-family: sans-serif; text-align: center; padding: 40px 20px; margin: 0; }
+      img.cover { width: 120px; height: 120px; object-fit: cover; border-radius: 16px; }
+      .type { color: #666; margin: 4px 0 28px; }
+      .btn { display: block; max-width: 320px; margin: 12px auto; padding: 14px 20px;
+             border-radius: 10px; font-size: 16px; font-weight: 600; text-decoration: none; }
+      .primary { background: #111; color: #fff; }
+      .secondary { background: #fff; color: #111; border: 1.5px solid #111; }
+      .note { color: #666; font-size: 13px; max-width: 320px; margin: 20px auto 0; }
+    </style>
   </head>
-  <body style="font-family:sans-serif;text-align:center;padding:40px">
+  <body>
+    <% if (store.images && store.images[0]) { %>
+    <img class="cover" src="<%= store.images[0] %>" alt="<%= store.storeName %>" />
+    <% } %>
     <h2><%= store.storeName %></h2>
-    <p><%= store.storeType %></p>
-    <p style="color:#666">Open this link on a phone with the Eshop app installed.</p>
+    <p class="type"><%= store.storeType %></p>
+
+    <% if (isAndroid) { %>
+      <a class="btn primary" href="<%= intentUrl %>">Open in App</a>
+      <% if (apkUrl) { %>
+      <a class="btn secondary" href="<%= apkUrl %>">Download App</a>
+      <p class="note">App install thakle "Open in App" tap koro. Install na thakle "Download App" diye APK download kore install koro.</p>
+      <% } %>
+    <% } else { %>
+      <p style="color:#666">Open this link on an Android phone with the Eshop app installed.</p>
+    <% } %>
   </body>
 </html>

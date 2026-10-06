@@ -1,6 +1,15 @@
 const StoreModel = require("../model/store.model.js");
 const AppReleaseModel = require("../model/appRelease.model.js");
 
+const buildIntentUrl = (req, apkUrl) => {
+  const pkg = process.env.ANDROID_PACKAGE_NAME;
+  const host = req.get("host");
+  const fallback = apkUrl
+    ? `;S.browser_fallback_url=${encodeURIComponent(apkUrl)}`
+    : "";
+  return `intent://${host}${req.originalUrl}#Intent;scheme=https;package=${pkg}${fallback};end`;
+};
+
 const getStoreByUniqueId = async (req, res) => {
   try {
     const { storeUniqueId } = req.params;
@@ -15,7 +24,6 @@ const getStoreByUniqueId = async (req, res) => {
     const [store] = await StoreModel.aggregate([
       { $match: { storeUniqueId: storeUniqueId.trim() } },
       {
-        // active app release (ekta-i), shorashori join
         $lookup: {
           from: AppReleaseModel.collection.name,
           pipeline: [
@@ -37,7 +45,6 @@ const getStoreByUniqueId = async (req, res) => {
       },
       { $addFields: { app: { $arrayElemAt: ["$app", 0] } } },
       {
-        // sensitive field (email, userId, fcmTokens) bad, shudhu public data
         $project: {
           storeUniqueId: 1,
           storeName: 1,
@@ -57,21 +64,22 @@ const getStoreByUniqueId = async (req, res) => {
       });
     }
 
-    // Browser hole HTML, app/API call hole JSON
+    // Browser hole HTML landing page, app/API call hole JSON
     const wantsHtml = (req.headers.accept || "").includes("text/html");
 
     if (wantsHtml) {
       const isAndroid = /android/i.test(req.headers["user-agent"] || "");
+      const apkUrl = store.app?.apkUrl || null;
 
-      // Android browser + app install nai (install thakle OS nijei app khule dey,
-      // ekhane ashe na) -> shorashori APK download
-      if (isAndroid && store.app?.apkUrl) {
-        res.set("Cache-Control", "no-store"); // notun version upload hole purono redirect cache na hoy
-        return res.redirect(302, store.app.apkUrl);
-      }
+      // notun version upload hole purono page cache na hoy
+      res.set("Cache-Control", "no-store");
 
-      // iPhone/desktop ba APK upload hoy ni -> fallback page
-      return res.render("store-fallback", { store });
+      return res.render("store-fallback", {
+        store,
+        isAndroid,
+        apkUrl,
+        intentUrl: isAndroid ? buildIntentUrl(req, apkUrl) : null,
+      });
     }
 
     return res.status(200).json({
