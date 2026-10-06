@@ -68,6 +68,7 @@ const stockRoutes = require("./src/routes/stock.routes.js");
 const companyRoutes = require("./src/routes/company.routes.js");
 const storeVisitRoutes = require("./src/routes/storeVisit.route.js")
 const appReleaseRoutes = require("./src/routes/appRelease.route.js");
+const installRoutes = require("./src/routes/install.routes.js");
 
 app.use("/api/register", registerRoutes);
 app.use("/api/login", loginRoutes);
@@ -91,6 +92,7 @@ app.use("/api/stock", stockRoutes);
 app.use("/api/company", companyRoutes);
 app.use("/api/store-visit",storeVisitRoutes)
 app.use("/api/app-release", appReleaseRoutes);
+app.use("/api/install", installRoutes);
 
 const port = process.env.PORT || 8090;
 
