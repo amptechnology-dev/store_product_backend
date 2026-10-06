@@ -5,7 +5,8 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title><%= store.storeName %></title>
     <meta property="og:title" content="<%= store.storeName %>" />
-    <meta property="og:description" content="Open <%= store.storeName %> in the Eshop app" />
+    <meta property="og:description"
+      content="Open <%= store.storeName %> in the Eshop app" />
     <% if (store.images && store.images[0]) { %>
     <meta property="og:image" content="<%= store.images[0] %>" />
     <% } %>
@@ -22,19 +23,17 @@
   </head>
   <body>
     <% if (store.images && store.images[0]) { %>
-    <img class="cover" src="<%= store.images[0] %>" alt="<%= store.storeName %>" />
+    <img class="cover" src="<%= store.images[0] %>"
+      alt="<%= store.storeName %>" />
     <% } %>
     <h2><%= store.storeName %></h2>
     <p class="type"><%= store.storeType %></p>
 
     <% if (isAndroid) { %>
-      <a class="btn primary" href="<%= intentUrl %>">Open in App</a>
-      <% if (apkUrl) { %>
-      <a class="btn secondary" href="<%= apkUrl %>">Download App</a>
-      <p class="note">App install thakle "Open in App" tap koro. Install na thakle "Download App" diye APK download kore install koro.</p>
-      <% } %>
+    <a class="btn primary" href="<%= intentUrl %>">Open in App</a>
     <% } else { %>
-      <p style="color:#666">Open this link on an Android phone with the Eshop app installed.</p>
+    <p style="color:#666">Open this link on an Android phone with the Eshop app
+      installed.</p>
     <% } %>
   </body>
 </html>
