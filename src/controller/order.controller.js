@@ -24,6 +24,8 @@ const {
 } = require("../helper/notification.helper.js");
 // [STOCK] product er stock management flag check
 const { isStockManaged } = require("../helper/storeSettings.js");
+// [TIER] quantity based pricing
+const { getUnitPrice } = require("../helper/priceTiers.js");
 
 // ===================== CONSTANTS / HELPERS =====================
 const ORDER_STATUSES = [
@@ -184,6 +186,14 @@ const attemptStoreCheckout = async ({
       continue;
     }
 
+    // [TIER] quantity onujayi server-side price (client theke kono price nei)
+    const unitPrice = getUnitPrice(
+      product,
+      line.variantId,
+      source.offerPrice,
+      line.quantity,
+    );
+
     // [STOCK] stock management on hole-i stock check + minus hoy, nahole shudhu order hoy
     if (isStockManaged(product)) {
       const unit = locateStockUnit(product, line.variantId);
@@ -248,9 +258,9 @@ const attemptStoreCheckout = async ({
       weight: source.weight,
       height: source.height,
       mrp: source.mrp,
-      offerPrice: source.offerPrice,
+      offerPrice: unitPrice, // [TIER]
       quantity: line.quantity,
-      lineTotal: round2(source.offerPrice * line.quantity),
+      lineTotal: round2(unitPrice * line.quantity), // [TIER]
     });
   }
 

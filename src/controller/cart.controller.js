@@ -11,6 +11,13 @@ const {
 const { resolveLineSource } = require("../helper/resolveVariant.js");
 // [STOCK] product er stock management flag check
 const { isStockManaged } = require("../helper/storeSettings.js");
+// [TIER] quantity based pricing
+const {
+  getUnitPrice,
+  findTiers,
+  pickTierPrice,
+  getNextTier,
+} = require("../helper/priceTiers.js");
 
 // ===================== HELPERS =====================
 
@@ -39,7 +46,8 @@ const handleError = (res, error, label) => {
   return res.status(500).json({ success: false, message: "Internal server error" });
 };
 
-const toSnapshot = (product, source) => ({
+// [TIER] quantity dhore tier price snapshot e boshay
+const toSnapshot = (product, source, quantity) => ({
   name: product.name,
   productCode: product.productCode,
   image: source.image,
@@ -49,7 +57,12 @@ const toSnapshot = (product, source) => ({
   weight: source.weight,
   height: source.height,
   mrp: source.mrp,
-  offerPrice: source.offerPrice,
+  offerPrice: getUnitPrice(
+    product,
+    source.variantId ?? null,
+    source.offerPrice,
+    quantity,
+  ),
 });
 
 const newSummary = () => ({
@@ -83,8 +96,9 @@ const serializeCart = async (cart) => {
   const [products, stores] = await Promise.all([
     ProductModel.find({ _id: { $in: productIds } })
       // [STOCK] hasStockManagement select e add kora hoyeche (lean e na thakle flag ashto na)
+      // [TIER] priceTiers select e add
       .select(
-        "name productCode images unit variants mrp offerPrice currentStock hasStockManagement isActive isVerified",
+        "name productCode images unit variants priceTiers mrp offerPrice currentStock hasStockManagement isActive isVerified",
       )
       .lean(),
     StoreModel.find({ _id: { $in: storeIds } })
@@ -133,13 +147,18 @@ const serializeCart = async (cart) => {
         inStock,
     );
 
-    const mrp = isAvailable ? liveSource.mrp : item.mrp;
-    const offerPrice = isAvailable ? liveSource.offerPrice : item.offerPrice;
-
     // [STOCK] quantity cap shudhu stock managed product e
     const exceedsStock =
       isAvailable && trackStock && liveSource.stock < item.quantity;
     const cappedQuantity = exceedsStock ? liveSource.stock : item.quantity;
+
+    // [TIER] price quantity er upor depend kore, tai cappedQuantity age
+    const tiers = liveProduct ? findTiers(liveProduct, item.variantId) : [];
+
+    const mrp = isAvailable ? liveSource.mrp : item.mrp;
+    const offerPrice = isAvailable
+      ? pickTierPrice(tiers, cappedQuantity, liveSource.offerPrice)
+      : item.offerPrice;
     const lineTotal = round2(offerPrice * cappedQuantity);
 
     for (const s of [group.summary, overall]) {
@@ -169,7 +188,10 @@ const serializeCart = async (cart) => {
       offerPrice,
       lineTotal,
       isAvailable,
-      priceChanged: isAvailable && liveSource.offerPrice !== item.offerPrice,
+      priceChanged: isAvailable && offerPrice !== item.offerPrice,
+      // [TIER] user app e tier list + "aro X ta nile Y price" hint
+      priceTiers: isAvailable ? tiers : [],
+      nextTier: isAvailable ? getNextTier(tiers, cappedQuantity) : null,
       // [STOCK] stock managed na hole stock null, frontend stockManaged dekhbe
       stock: !trackStock ? null : isAvailable ? liveSource.stock : 0,
       stockManaged: trackStock,
@@ -279,7 +301,8 @@ const addToCart = async (req, res) => {
       });
     }
 
-    const snapshot = toSnapshot(product, source);
+    // [TIER] final quantity (newQuantity) onujayi price
+    const snapshot = toSnapshot(product, source, newQuantity);
 
     if (existing) {
       existing.set({
@@ -371,7 +394,8 @@ const updateCartItem = async (req, res) => {
       });
     }
 
-    item.set({ ...toSnapshot(product, source), quantity });
+    // [TIER] notun quantity onujayi price
+    item.set({ ...toSnapshot(product, source, quantity), quantity });
     await cart.save();
 
     return res.status(200).json({

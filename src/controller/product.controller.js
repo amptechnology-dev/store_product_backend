@@ -25,6 +25,12 @@ const {
   getStockManagementEnabled,
   isStockManaged,
 } = require("../helper/storeSettings.js");
+// [TIER] quantity based pricing
+const {
+  applyPriceTiers,
+  productHasTiers,
+  getMinTierPrice,
+} = require("../helper/priceTiers.js");
 
 const escapeRegex = (str = "") => str.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
@@ -99,6 +105,71 @@ const buildOfferPriceStages = () => [
   },
 ];
 
+// [TIER] form-data te string hoye ashle JSON parse kore
+const parseJsonField = (body, key) => {
+  if (typeof body[key] === "string") {
+    try {
+      body[key] = JSON.parse(body[key]);
+    } catch {
+      return `Invalid ${key} format`;
+    }
+  }
+  return null;
+};
+
+// [TIER] raw tier list -> clean numbers (minQty chain: first = 1, next = prev.maxQty + 1)
+const normalizeTierList = (tiers) => {
+  if (!Array.isArray(tiers)) return [];
+  const out = [];
+  tiers.forEach((t, i) => {
+    const prev = out[i - 1];
+    const minQty =
+      i === 0
+        ? 1
+        : prev && prev.maxQty !== null
+          ? prev.maxQty + 1
+          : Number(t?.minQty);
+    const hasMax =
+      t?.maxQty !== undefined && t?.maxQty !== null && t?.maxQty !== "";
+    out.push({
+      minQty,
+      maxQty: hasMax ? Number(t.maxQty) : null,
+      price: Number(t?.price),
+    });
+  });
+  return out;
+};
+
+// [TIER] applyPriceTiers er por chalano hoy. Jate update e tier kokhono silently
+// purono thake na (empty array, simple <-> variant switch, validateProduct e drop hoye jawa).
+//  - simple product : data.priceTiers = body er tiers (empty hole [])
+//  - variant product: top-level priceTiers = [], variant / sizeVariant e body theke tiers
+const syncTiers = (data, body, hasVariants) => {
+  if (!hasVariants) {
+    if (data.priceTiers === undefined) {
+      data.priceTiers = normalizeTierList(body.priceTiers);
+    }
+    return;
+  }
+
+  data.priceTiers = [];
+  const src = Array.isArray(body.variants) ? body.variants : [];
+
+  (data.variants || []).forEach((v, i) => {
+    const s = src[i] || {};
+    const hasSizes = Array.isArray(v.sizeVariants) && v.sizeVariants.length > 0;
+
+    if (v.priceTiers === undefined) {
+      v.priceTiers = hasSizes ? [] : normalizeTierList(s.priceTiers);
+    }
+    (v.sizeVariants || []).forEach((sv, j) => {
+      if (sv.priceTiers === undefined) {
+        sv.priceTiers = normalizeTierList(s.sizeVariants?.[j]?.priceTiers);
+      }
+    });
+  });
+};
+
 const createProduct = async (req, res) => {
   try {
     const body = { ...req.body };
@@ -119,6 +190,11 @@ const createProduct = async (req, res) => {
           .status(400)
           .json({ success: false, message: "Invalid packagingDetails format" });
       }
+    }
+    // [TIER]
+    const tierParseError = parseJsonField(body, "priceTiers");
+    if (tierParseError) {
+      return res.status(400).json({ success: false, message: tierParseError });
     }
 
     const parsedData = createProductSchema.parse(body);
@@ -185,6 +261,18 @@ const createProduct = async (req, res) => {
         .status(400)
         .json({ success: false, message: "Validation failed", errors });
     }
+
+    // [TIER] quantity based price tiers validate + attach
+    const tierError = applyPriceTiers(body, data, hasVariants);
+    if (tierError) {
+      return res.status(400).json({
+        success: false,
+        message: "Validation failed",
+        errors: [{ field: "priceTiers", message: tierError }],
+      });
+    }
+    // [TIER] tier gulo shobshomoy data te thakbe
+    syncTiers(data, body, hasVariants);
 
     // [STOCK] store settings e stock management on ache kina (product e snapshot hishebe save hobe)
     const stockEnabled = await getStockManagementEnabled(parsedData.storeId);
@@ -342,6 +430,7 @@ const getAllProducts = async (req, res) => {
           description: 1,
           unit: 1,
           variants: 1,
+          priceTiers: 1,
           mrp: 1,
           offerPrice: 1,
           stock: 1,
@@ -470,6 +559,11 @@ const updateProduct = async (req, res) => {
           .json({ success: false, message: "Invalid packagingDetails format" });
       }
     }
+    // [TIER]
+    const tierParseError = parseJsonField(body, "priceTiers");
+    if (tierParseError) {
+      return res.status(400).json({ success: false, message: tierParseError });
+    }
 
     const parsedData = updateProductSchema.parse(body);
 
@@ -520,12 +614,13 @@ const updateProduct = async (req, res) => {
 
     let updateData = { ...parsedData, images: finalMainImages };
 
-    // variants/pricing/stock somporkito kono field ashle notun kore structure decide hobe
+    // variants/pricing/stock/tier somporkito kono field ashle notun kore structure decide hobe
     const isStructuralUpdate =
       body.variants !== undefined ||
       body.mrp !== undefined ||
       body.offerPrice !== undefined ||
-      body.openingStock !== undefined;
+      body.openingStock !== undefined ||
+      body.priceTiers !== undefined;
 
     if (isStructuralUpdate) {
       const { errors, data, hasVariants, hasColor } = validateProduct(body, {
@@ -537,6 +632,18 @@ const updateProduct = async (req, res) => {
           .status(400)
           .json({ success: false, message: "Validation failed", errors });
       }
+
+      // [TIER] quantity based price tiers validate + attach
+      const tierError = applyPriceTiers(body, data, hasVariants);
+      if (tierError) {
+        return res.status(400).json({
+          success: false,
+          message: "Validation failed",
+          errors: [{ field: "priceTiers", message: tierError }],
+        });
+      }
+      // [TIER] tier gulo shobshomoy data te thakbe (empty hole purono tier muche jabe)
+      syncTiers(data, body, hasVariants);
 
       if (hasColor) {
         const colorImageMap = await uploadVariantImages(req.files);
@@ -619,7 +726,10 @@ const updateProduct = async (req, res) => {
 
       // [STOCK] low stock flag shudhu stock managed product er jonno
       if (stockManaged) {
-        const tempForFlagCheck = { ...existingProduct.toObject(), ...updateData };
+        const tempForFlagCheck = {
+          ...existingProduct.toObject(),
+          ...updateData,
+        };
         updateData.hasLowStock = computeLowStock(tempForFlagCheck).hasLowStock;
       } else {
         updateData.hasLowStock = false;
@@ -835,6 +945,7 @@ const allProductWithStore = async (req, res) => {
           description: 1,
           unit: 1,
           variants: 1,
+          priceTiers: 1,
           minOfferPrice: 1,
           maxOfferPrice: 1,
           deliveryTime: 1,
@@ -885,7 +996,7 @@ const PUBLIC_STORE_FIELDS =
   "storeName storeType storeUniqueId images address lat long contactNo whatsappNo supportNo email description timingByDay isFeatured";
 
 const PRODUCT_LIST_FIELDS =
-  "name productCode images description unit variants deliveryTime storeId categoryId createdAt";
+  "name productCode images description unit variants priceTiers deliveryTime storeId categoryId createdAt";
 
 const SORT_MAP = {
   newest: { createdAt: -1 },
@@ -911,12 +1022,15 @@ const getPublicStore = (storeUniqueId) =>
     .select(PUBLIC_STORE_FIELDS)
     .lean();
 
+// [TIER] hasTierPricing + minTierPrice jog kora hoyeche (user app er jonno)
 const formatProduct = ({ categoryId, ...product }) => ({
   ...product,
   categoryId: categoryId?._id ?? null,
   category: categoryId?._id
     ? { _id: categoryId._id, name: categoryId.name }
     : null,
+  hasTierPricing: productHasTiers(product),
+  minTierPrice: getMinTierPrice(product),
 });
 
 const fetchStoreProducts = async (store, query, categoryId) => {
@@ -994,6 +1108,7 @@ const fetchStoreProducts = async (store, query, categoryId) => {
               description: 1,
               unit: 1,
               variants: 1,
+              priceTiers: 1,
               mrp: 1,
               offerPrice: 1,
               stock: 1,
@@ -1309,7 +1424,7 @@ const getStoreSingleProduct = async (req, res) => {
     }
 
     const categoryId = product.categoryId?._id;
-    const relatedProducts = categoryId
+    const relatedRaw = categoryId
       ? await ProductModel.find({
           storeId: store._id,
           categoryId,
@@ -1322,6 +1437,14 @@ const getStoreSingleProduct = async (req, res) => {
           .limit(8)
           .lean()
       : [];
+
+    // [TIER] related product e o hasTierPricing / minTierPrice jabe
+    const relatedProducts = relatedRaw.map((p) =>
+      formatProduct({
+        ...p,
+        categoryId: categoryId ? { _id: categoryId } : null,
+      }),
+    );
 
     return res.status(200).json({
       success: true,

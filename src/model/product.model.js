@@ -12,6 +12,16 @@ const packagingDetailsSchema = new mongoose.Schema(
   { _id: false },
 );
 
+// quantity based price: minQty..maxQty er jonno per-unit price
+const priceTierSchema = new mongoose.Schema(
+  {
+    minQty: { type: Number, required: true, min: 1 },
+    maxQty: { type: Number, default: null, min: 1 }, // null = no limit
+    price: { type: Number, required: true, min: 0 }, // per unit price
+  },
+  { _id: false },
+);
+
 const offerPriceValidator = {
   validator: function (value) {
     if (value === undefined || value === null) return true;
@@ -43,6 +53,7 @@ const sizeVariantSchema = new mongoose.Schema(
     sku: { type: String, trim: true },
     isActive: { type: Boolean, default: true },
     packagingDetails: packagingDetailsSchema,
+    priceTiers: { type: [priceTierSchema], default: [] },
   },
   { timestamps: false },
 );
@@ -77,6 +88,7 @@ const variantSchema = new mongoose.Schema(
     sku: { type: String, trim: true },
     isActive: { type: Boolean, default: true },
     packagingDetails: packagingDetailsSchema,
+    priceTiers: { type: [priceTierSchema], default: [] },
 
     sizeVariants: { type: [sizeVariantSchema], default: [] },
   },
@@ -128,6 +140,7 @@ const productSchema = new mongoose.Schema(
     lowStockThreshold: { type: Number, default: 0, min: 0 },
     hasLowStock: { type: Boolean, default: false, index: true },
     packagingDetails: packagingDetailsSchema,
+    priceTiers: { type: [priceTierSchema], default: [] },
 
     variants: { type: [variantSchema], default: [] },
 
