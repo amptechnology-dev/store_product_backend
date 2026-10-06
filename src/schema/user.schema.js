@@ -1,12 +1,18 @@
 const { z } = require("zod");
 
 const addressSchema = z.object({
+  label: z.enum(["HOME", "WORK", "OTHER"]).optional(),
   addressLine: z.string().trim().min(1, "Address line is required"),
   area: z.string().trim().optional(),
   city: z.string().trim().min(1, "City is required"),
   state: z.string().trim().min(1, "State is required"),
-  pincode: z.string().trim().min(4, "Valid pincode is required"),
+  pincode: z
+    .string()
+    .trim()
+    .min(4, "Invalid pincode")
+    .max(10, "Invalid pincode"),
   country: z.string().trim().optional(),
+  isDefault: z.boolean().optional(),
 });
 
 const createUserSchema = z.object({
@@ -29,6 +35,7 @@ const createUserSchema = z.object({
   address: addressSchema.optional(),
 });
 
+// address ekhon alada API (/addresses) diye manage hoy, tai ekhane nei
 const updateUserSchema = z.object({
   name: z.string().min(2).optional(),
 
@@ -39,8 +46,6 @@ const updateUserSchema = z.object({
   role: z.enum(["ADMIN", "STORE"]).optional(),
 
   isActive: z.boolean().optional(),
-
-  address: addressSchema.partial().optional(),
 });
 
 const loginSchema = z.object({
@@ -86,6 +91,9 @@ const loginWithOtpSchema = z.object({
   resetToken: z.string().min(1, "Reset token is required"),
 });
 
+const addAddressSchema = addressSchema;
+const updateAddressSchema = addressSchema.partial();
+
 module.exports = {
   createUserSchema,
   updateUserSchema,
@@ -95,4 +103,6 @@ module.exports = {
   verifyOtpSchema,
   resetPasswordSchema,
   loginWithOtpSchema,
+  addAddressSchema,
+  updateAddressSchema,
 };

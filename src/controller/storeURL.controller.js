@@ -50,6 +50,7 @@ const getStoreByUniqueId = async (req, res) => {
           storeName: 1,
           storeType: 1,
           images: 1,
+          qrCodeUrl: 1,
           isActive: 1,
           isVerify: 1,
           app: 1,

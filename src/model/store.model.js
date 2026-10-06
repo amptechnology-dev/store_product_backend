@@ -93,6 +93,8 @@ const storeSchema = new mongoose.Schema(
       default: 0,
     },
     fcmTokens: [{ type: String }],
+    qrCodeUrl: { type: String },
+    qrCodeKey: { type: String },
   },
   { timestamps: true },
 );

@@ -1,17 +1,20 @@
 const mongoose = require("mongoose");
 const { model } = mongoose;
 
-const addressSchema = new mongoose.Schema(
-  {
-    addressLine: { type: String, required: true, trim: true },
-    area: { type: String, trim: true },
-    city: { type: String, required: true, trim: true },
-    state: { type: String, required: true, trim: true },
-    pincode: { type: String, required: true, trim: true },
-    country: { type: String, default: "India", trim: true },
+const addressSchema = new mongoose.Schema({
+  label: {
+    type: String,
+    enum: ["HOME", "WORK", "OTHER"],
+    default: "HOME",
   },
-  { _id: false },
-);
+  addressLine: { type: String, required: true, trim: true },
+  area: { type: String, trim: true },
+  city: { type: String, required: true, trim: true },
+  state: { type: String, required: true, trim: true },
+  pincode: { type: String, required: true, trim: true },
+  country: { type: String, default: "India", trim: true },
+  isDefault: { type: Boolean, default: false },
+});
 
 const userSchema = new mongoose.Schema(
   {
@@ -32,7 +35,7 @@ const userSchema = new mongoose.Schema(
       enum: ["LOCAL", "GOOGLE"],
       default: "LOCAL",
     },
-    address: { type: addressSchema, default: null },
+    addresses: { type: [addressSchema], default: [] },
     isActive: { type: Boolean, default: true },
     isVerified: { type: Boolean, default: false },
     fcmTokens: { type: [String], default: [], select: false },

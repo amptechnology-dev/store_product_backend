@@ -25,6 +25,7 @@ const {
   clearRecentSearches,
   relatedStores,
   nearbyStores,
+  generateStoreQrCode
 } = require("../controller/register.controller.js");
 const verifyJwt = require("../middleware/verifiyUser.js");
 const authorize = require("../middleware/authorize.js");
@@ -60,5 +61,6 @@ router.get("/recent-search-stores", verifyJwt, recentSearchStores);
 router.delete("/clear-recent-searches", verifyJwt, clearRecentSearches);
 router.get("/related-stores/:storeId", relatedStores);
 router.get("/nearby-stores", verifyJwt, nearbyStores);
+router.post("/generate-store-qr/:storeId", verifyJwt, generateStoreQrCode);
 
 module.exports = router;

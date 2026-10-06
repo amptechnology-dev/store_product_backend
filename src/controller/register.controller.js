@@ -23,6 +23,10 @@ const {
   setAuthCookie,
   buildResponseUser,
 } = require("../helper/authToken");
+const {
+  generateStoreQr,
+  safeGenerateStoreQr,
+} = require("../helper/storeQr.js");
 
 const normalizeEmail = (email) =>
   String(email || "")
@@ -417,6 +421,8 @@ const registerStoreOwner = async (req, res) => {
       userId: user._id,
     });
 
+    await safeGenerateStoreQr(store);
+
     let emailSent = true;
     try {
       await sendPasswordEmail(normalizedEmail, password);
@@ -559,7 +565,8 @@ const createUser = async (req, res) => {
       isVisitor: toBool(req.body.isVisitor),
     });
 
-    // user + store are saved at this point, so a mail failure must not roll them back
+    await safeGenerateStoreQr(store);
+
     let emailSent = true;
     try {
       await sendStoreCredentialsEmail({
@@ -684,6 +691,8 @@ const createStore = async (req, res) => {
 
       isVerify: false,
     });
+
+    await safeGenerateStoreQr(store);
 
     return res.status(201).json({
       message: "Store created successfully",
@@ -833,7 +842,7 @@ const singleStore = async (req, res) => {
           isVerify: 1,
           isActive: 1,
           isVisitor: 1,
-
+          qrCodeUrl: 1,
           owner: {
             _id: "$owner._id",
             name: "$owner.name",
@@ -979,6 +988,10 @@ const updateStoreAndUser = async (req, res) => {
       },
       { new: true },
     );
+
+    if (req.body.storeName && req.body.storeName !== store.storeName) {
+      await safeGenerateStoreQr(updatedStore);
+    }
 
     return res.status(200).json({
       message: "User and store updated successfully",
@@ -1530,7 +1543,9 @@ const registerUser = async (req, res) => {
       role: "USER",
       provider: "LOCAL",
       isVerified: false,
-      address: parsedData.address,
+      addresses: parsedData.address
+        ? [{ ...parsedData.address, isDefault: true }]
+        : [],
     });
 
     let otpSent = true;
@@ -1554,6 +1569,58 @@ const registerUser = async (req, res) => {
       role: "USER",
       label: "User registration error",
     });
+  }
+};
+
+const generateStoreQrCode = async (req, res) => {
+  try {
+    const { storeId } = req.params;
+
+    if (!mongoose.isValidObjectId(storeId)) {
+      return res
+        .status(400)
+        .json({ success: false, message: "Invalid store id" });
+    }
+
+    const store = await StoreModel.findById(storeId);
+    if (!store) {
+      return res
+        .status(404)
+        .json({ success: false, message: "Store not found" });
+    }
+
+    const userId = String(req.user._id || req.user.id);
+    const isAdmin = req.user.role === "ADMIN";
+    if (!isAdmin && String(store.userId) !== userId) {
+      return res
+        .status(403)
+        .json({
+          success: false,
+          message: "You can't generate QR for this store",
+        });
+    }
+
+    const force = req.query.regenerate === "true";
+    if (store.qrCodeUrl && !force) {
+      return res.status(200).json({
+        success: true,
+        message: "QR code already exists",
+        qrCodeUrl: store.qrCodeUrl,
+      });
+    }
+
+    const qrCodeUrl = await generateStoreQr(store);
+
+    return res.status(200).json({
+      success: true,
+      message: "QR code generated successfully",
+      qrCodeUrl,
+    });
+  } catch (error) {
+    console.error("Generate store QR error:", error);
+    return res
+      .status(500)
+      .json({ success: false, message: "Failed to generate QR code" });
   }
 };
 
@@ -1582,4 +1649,5 @@ module.exports = {
   relatedStores,
   nearbyStores,
   registerUser,
+  generateStoreQrCode,
 };

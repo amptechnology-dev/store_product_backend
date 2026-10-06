@@ -174,7 +174,8 @@ const login = async (req, res) => {
     if (matched.length > 1) {
       return res.status(400).json({
         success: false,
-        message: "Multiple accounts found for this email. Please select a role.",
+        message:
+          "Multiple accounts found for this email. Please select a role.",
         requireRole: true,
         roles: matched.map((a) => a.role),
       });
@@ -267,7 +268,7 @@ const updateProfile = async (req, res) => {
   try {
     const userId = req.user.id;
     const parsedData = updateUserSchema.parse(req.body);
-    const { name, phone, address } = parsedData;
+    const { name, phone } = parsedData;
     const existingUser = await UserModel.findById(userId);
     if (!existingUser) {
       return res.status(404).json({
@@ -279,13 +280,6 @@ const updateProfile = async (req, res) => {
     const updateFields = {};
     if (name !== undefined) updateFields.name = name.trim();
     if (phone !== undefined) updateFields.phone = phone.trim();
-
-    if (address !== undefined) {
-      updateFields.address = {
-        ...(existingUser.address?.toObject?.() || existingUser.address || {}),
-        ...address,
-      };
-    }
 
     if (Object.keys(updateFields).length === 0) {
       return res.status(400).json({
