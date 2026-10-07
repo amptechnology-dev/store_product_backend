@@ -13,11 +13,12 @@ const {
   getStoreOrders,
   getStoreOrderById,
   updateOrderStatus,
+  updateDeliveryDate,
 } = require("../controller/order.controller.js");
 
 // ---------- USER ----------
 router.post("/checkout", verifyJwt, authorize("USER"), checkout);
-router.post("/buy-now", verifyJwt, authorize("USER"), buyNow); // ✅ NEW: cart chara direct order
+router.post("/buy-now", verifyJwt, authorize("USER"), buyNow);
 router.get("/my-orders", verifyJwt, authorize("USER"), getMyOrders);
 router.get(
   "/my-orders/by-store",
@@ -46,6 +47,12 @@ router.patch(
   verifyJwt,
   authorize("STORE"),
   updateOrderStatus,
+);
+router.patch(
+  "/store-orders/:orderId/delivery-date",
+  verifyJwt,
+  authorize("STORE"),
+  updateDeliveryDate,
 );
 
 module.exports = router;

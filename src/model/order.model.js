@@ -94,6 +94,7 @@ const orderSchema = new mongoose.Schema(
 
     deliveryAddress: { type: deliveryAddressSchema, required: true },
     note: { type: String, default: null },
+    expectedDeliveryDate: { type: Date, default: null },
 
     paymentMethod: { type: String, enum: ["COD"], default: "COD" },
     paymentStatus: {

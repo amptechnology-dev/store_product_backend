@@ -25,6 +25,9 @@ const priceTierSchema = new mongoose.Schema(
 const offerPriceValidator = {
   validator: function (value) {
     if (value === undefined || value === null) return true;
+    if (Array.isArray(this?.priceTiers) && this.priceTiers.length > 0) {
+      return true;
+    }
     return this.mrp === undefined || this.mrp === null || value <= this.mrp;
   },
   message: "Offer price cannot be greater than MRP",

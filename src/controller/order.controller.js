@@ -8,6 +8,7 @@ const {
   directCheckoutSchema,
   cancelOrderSchema,
   updateOrderStatusSchema,
+  updateDeliveryDateSchema,
 } = require("../schema/order.schema.js");
 const { resolveLineSource } = require("../helper/resolveVariant.js");
 const {
@@ -47,6 +48,10 @@ const ALLOWED_TRANSITIONS = {
 
 const CUSTOMER_FIELDS = "name phone email";
 const MAX_LIMIT = 100;
+
+const DELIVERY_DATE_EDITABLE = ["PENDING", "CONFIRMED", "SHIPPED"];
+
+const toDeliveryDate = (str) => new Date(`${str}T00:00:00.000Z`);
 
 const getUserId = (req) => req.user?._id || req.user?.id;
 const round2 = (n) => Math.round((n + Number.EPSILON) * 100) / 100;
@@ -845,7 +850,7 @@ const getStoreOrderById = async (req, res) => {
 };
 
 // ===================== 9. UPDATE ORDER STATUS (store side) =====================
-// PATCH /api/order/store-orders/:orderId/status   body: { status, note? }
+// PATCH /api/order/store-orders/:orderId/status   body: { status, note?, expectedDeliveryDate? }
 const updateOrderStatus = async (req, res) => {
   try {
     const { orderId } = req.params;
@@ -857,10 +862,11 @@ const updateOrderStatus = async (req, res) => {
         .json({ success: false, message: "Invalid order id" });
     }
 
-    const { status, note } = updateOrderStatusSchema.parse(req.body);
+    const { status, note, expectedDeliveryDate } =
+      updateOrderStatusSchema.parse(req.body);
 
     const existing = await OrderModel.findById(orderId)
-      .select("storeId status")
+      .select("storeId status expectedDeliveryDate")
       .lean();
     if (!existing) {
       return res
@@ -892,6 +898,24 @@ const updateOrderStatus = async (req, res) => {
     }
     if (status === "DELIVERED") {
       extra.paymentStatus = "PAID"; // COD: delivery te taka pawa jay
+    }
+    if (status === "SHIPPED") {
+      // shipped korar age delivery date lagbe (notun pathale seta, nahole age thekei thakte hobe)
+      if (!expectedDeliveryDate && !existing.expectedDeliveryDate) {
+        return res.status(400).json({
+          success: false,
+          message: "Expected delivery date is required before shipping",
+          errors: [
+            {
+              field: "expectedDeliveryDate",
+              message: "Expected delivery date is required before shipping",
+            },
+          ],
+        });
+      }
+      if (expectedDeliveryDate) {
+        extra.expectedDeliveryDate = toDeliveryDate(expectedDeliveryDate);
+      }
     }
 
     const order = await transitionOrder({
@@ -926,6 +950,70 @@ const updateOrderStatus = async (req, res) => {
   }
 };
 
+// ===================== 10. SET / EDIT EXPECTED DELIVERY DATE (store side) =====================
+// PATCH /api/order/store-orders/:orderId/delivery-date   body: { expectedDeliveryDate: "YYYY-MM-DD" }
+const updateDeliveryDate = async (req, res) => {
+  try {
+    const { orderId } = req.params;
+    const userId = getUserId(req);
+
+    if (!mongoose.isValidObjectId(orderId)) {
+      return res
+        .status(400)
+        .json({ success: false, message: "Invalid order id" });
+    }
+
+    const { expectedDeliveryDate } = updateDeliveryDateSchema.parse(req.body);
+
+    const existing = await OrderModel.findById(orderId)
+      .select("storeId status")
+      .lean();
+    if (!existing) {
+      return res
+        .status(404)
+        .json({ success: false, message: "Order not found" });
+    }
+
+    if (!(await isStoreOwner(existing.storeId, userId))) {
+      return res.status(403).json({
+        success: false,
+        message: "Not authorized to update this order",
+      });
+    }
+
+    if (!DELIVERY_DATE_EDITABLE.includes(existing.status)) {
+      return res.status(400).json({
+        success: false,
+        message: `Delivery date cannot be changed once order is ${existing.status}`,
+      });
+    }
+
+    // status filter diye atomic: ei majhe DELIVERED/CANCELLED hoye gele update hobe na
+    const order = await OrderModel.findOneAndUpdate(
+      { _id: orderId, status: { $in: DELIVERY_DATE_EDITABLE } },
+      { $set: { expectedDeliveryDate: toDeliveryDate(expectedDeliveryDate) } },
+      { new: true },
+    )
+      .populate("userId", CUSTOMER_FIELDS)
+      .lean();
+
+    if (!order) {
+      return res.status(409).json({
+        success: false,
+        message: "Order status has just changed, please refresh",
+      });
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: "Expected delivery date updated",
+      order,
+    });
+  } catch (error) {
+    return handleError(res, error, "Update Delivery Date Error");
+  }
+};
+
 module.exports = {
   checkout,
   buyNow,
@@ -936,4 +1024,5 @@ module.exports = {
   getStoreOrders,
   getStoreOrderById,
   updateOrderStatus,
+  updateDeliveryDate,
 };

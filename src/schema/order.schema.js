@@ -50,9 +50,30 @@ const cancelOrderSchema = z.object({
   reason: z.string().trim().optional(),
 });
 
+// ---- Expected delivery date (YYYY-MM-DD, aajker (IST) ba tar por) ----
+const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
+const todayIST = () =>
+  new Date(Date.now() + IST_OFFSET_MS).toISOString().slice(0, 10);
+
+const deliveryDateSchema = z
+  .string()
+  .trim()
+  .regex(/^\d{4}-\d{2}-\d{2}$/, "Delivery date must be in YYYY-MM-DD format")
+  .refine((v) => {
+    const d = new Date(`${v}T00:00:00.000Z`);
+    return !Number.isNaN(d.getTime()) && d.toISOString().slice(0, 10) === v;
+  }, "Invalid delivery date")
+  .refine((v) => v >= todayIST(), "Delivery date cannot be in the past");
+
 const updateOrderStatusSchema = z.object({
   status: z.enum(ORDER_STATUSES),
   note: z.string().trim().optional(),
+  // SHIPPED korar somoy pathano jabe (order e age theke na thakle required)
+  expectedDeliveryDate: deliveryDateSchema.optional(),
+});
+
+const updateDeliveryDateSchema = z.object({
+  expectedDeliveryDate: deliveryDateSchema,
 });
 
 module.exports = {
@@ -61,4 +82,5 @@ module.exports = {
   directCheckoutSchema,
   cancelOrderSchema,
   updateOrderStatusSchema,
+  updateDeliveryDateSchema,
 };

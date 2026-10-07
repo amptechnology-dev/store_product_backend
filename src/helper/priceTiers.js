@@ -1,10 +1,19 @@
 const MAX_TIERS = 10;
 
-const toNum = (v) =>
-  v === undefined || v === null || v === "" ? null : Number(v);
+const isBlank = (v) => v === undefined || v === null || v === "";
+
+const toNum = (v) => (isBlank(v) ? null : Number(v));
+
+// validateProduct er isEmptySizeVariant er sathe same, jate index mismatch na hoy
+const isEmptySizeRow = (raw) =>
+  !(raw?.size || raw?.weight || raw?.height) &&
+  !raw?.sku &&
+  isBlank(raw?.mrp) &&
+  isBlank(raw?.offerPrice);
 
 // raw tiers validate + normalize kore. return: { tiers } ba { error }
-const normalizeTiers = (raw, { mrp = null, label = "" } = {}) => {
+// NOTE: tier price er upor MRP validation nei (tier price MRP er beshi hole-o cholbe)
+const normalizeTiers = (raw, { label = "" } = {}) => {
   if (raw === undefined || raw === null) return { tiers: [] };
   if (!Array.isArray(raw)) return { error: `${label}Invalid price tiers` };
   if (raw.length === 0) return { tiers: [] };
@@ -28,11 +37,6 @@ const normalizeTiers = (raw, { mrp = null, label = "" } = {}) => {
     if (t.price === null || !Number.isFinite(t.price) || t.price < 0) {
       return { error: `${label}Tier ${i + 1}: valid price is required` };
     }
-    if (mrp !== null && mrp !== undefined && t.price > Number(mrp)) {
-      return {
-        error: `${label}Tier ${i + 1}: price cannot be greater than MRP`,
-      };
-    }
   }
 
   tiers.sort((a, b) => a.minQty - b.minQty);
@@ -46,9 +50,18 @@ const normalizeTiers = (raw, { mrp = null, label = "" } = {}) => {
     const isLast = i === tiers.length - 1;
 
     if (isLast) {
-      t.maxQty = null; // last tier sobshomoy open-ended (50+)
+      // last tier: maxQty khali = no limit, value thakle seta RAKHBE (age null kore dito)
+      if (
+        t.maxQty !== null &&
+        (!Number.isInteger(t.maxQty) || t.maxQty < t.minQty)
+      ) {
+        return {
+          error: `${label}Tier ${i + 1}: max quantity must be a whole number >= ${t.minQty}`,
+        };
+      }
       continue;
     }
+
     if (!Number.isInteger(t.maxQty) || t.maxQty < t.minQty) {
       return {
         error: `${label}Tier ${i + 1}: max quantity must be >= min quantity`,
@@ -65,11 +78,16 @@ const normalizeTiers = (raw, { mrp = null, label = "" } = {}) => {
 };
 
 // qty er jonno kon tier er price lagbe
+// last tier er maxQty set thakle, tar upore qty gele fallback (normal price) hobe
 const pickTierPrice = (tiers, qty, fallback) => {
   if (!Array.isArray(tiers) || tiers.length === 0) return fallback;
   const sorted = [...tiers].sort((a, b) => b.minQty - a.minQty);
   const tier = sorted.find((t) => qty >= t.minQty);
-  return tier ? tier.price : fallback;
+  if (!tier) return fallback;
+  if (tier.maxQty !== null && tier.maxQty !== undefined && qty > tier.maxQty) {
+    return fallback;
+  }
+  return tier.price;
 };
 
 // product er je unit (simple / variant / sizeVariant) er variantId, tar tiers
@@ -121,44 +139,61 @@ const getMinTierPrice = (p) => {
 };
 
 // validateProduct er por: body theke tier niye data te boshay.
+// offerPrice: user explicitly dile seta thakbe, khali hole tiers[0].price hobe.
 // error thakle string return kore.
 const applyPriceTiers = (body, data, hasVariants) => {
   if (!hasVariants) {
-    const r = normalizeTiers(body.priceTiers, { mrp: data.mrp });
+    const r = normalizeTiers(body.priceTiers);
     if (r.error) return r.error;
     data.priceTiers = r.tiers;
-    if (r.tiers.length) data.offerPrice = r.tiers[0].price;
+    if (r.tiers.length && isBlank(body.offerPrice)) {
+      data.offerPrice = r.tiers[0].price;
+    }
     return null;
   }
 
   data.priceTiers = [];
-  const bodyVariants = Array.isArray(body.variants) ? body.variants : [];
+
+  const hasColor = (data.variants || []).some((v) => v.color);
+  const bodyAll = (Array.isArray(body.variants) ? body.variants : []).filter(
+    Boolean,
+  );
+  // validateProduct jevabe filter kore, thik sevabei align kora
+  const srcVariants = hasColor
+    ? bodyAll
+    : bodyAll.filter((v) => !isEmptySizeRow(v));
 
   for (let i = 0; i < (data.variants || []).length; i++) {
     const v = data.variants[i];
-    const src = bodyVariants[i] || {};
+    const src = srcVariants[i] || {};
 
     if (Array.isArray(v.sizeVariants) && v.sizeVariants.length) {
       v.priceTiers = [];
-      const srcSizes = Array.isArray(src.sizeVariants) ? src.sizeVariants : [];
+      const srcSizes = (
+        Array.isArray(src.sizeVariants) ? src.sizeVariants : []
+      ).filter((sv) => !isEmptySizeRow(sv));
+
       for (let j = 0; j < v.sizeVariants.length; j++) {
         const sv = v.sizeVariants[j];
-        const r = normalizeTiers(srcSizes[j]?.priceTiers, {
-          mrp: sv.mrp,
+        const srcSize = srcSizes[j] || {};
+        const r = normalizeTiers(srcSize.priceTiers, {
           label: `Variant ${i + 1} - Size ${j + 1}: `,
         });
         if (r.error) return r.error;
         sv.priceTiers = r.tiers;
-        if (r.tiers.length) sv.offerPrice = r.tiers[0].price;
+        if (r.tiers.length && isBlank(srcSize.offerPrice)) {
+          sv.offerPrice = r.tiers[0].price;
+        }
       }
     } else {
       const r = normalizeTiers(src.priceTiers, {
-        mrp: v.mrp,
         label: `Variant ${i + 1}: `,
       });
       if (r.error) return r.error;
       v.priceTiers = r.tiers;
-      if (r.tiers.length) v.offerPrice = r.tiers[0].price;
+      if (r.tiers.length && isBlank(src.offerPrice)) {
+        v.offerPrice = r.tiers[0].price;
+      }
     }
   }
   return null;
