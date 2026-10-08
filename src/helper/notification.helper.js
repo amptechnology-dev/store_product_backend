@@ -31,7 +31,11 @@ const notifyStore = async ({ order, type, title, body }) => {
 
     const response = await getMessaging().sendEachForMulticast({
       notification: { title, body },
-      data: { orderId: String(order._id), type },
+      data: {
+        orderId: String(order._id),
+        type,
+        priceStatus: String(order.priceStatus || "NOT_REQUIRED"),
+      },
       tokens: store.fcmTokens,
     });
 
@@ -57,7 +61,10 @@ const notifyNewOrder = (order) =>
     order,
     type: "NEW_ORDER",
     title: "New Order Received",
-    body: `Order #${order.orderNumber} • ₹${order.totalAmount}`,
+    body:
+      order.priceStatus === "AWAITING_QUOTE"
+        ? `Order #${order.orderNumber} • Price estimate needed`
+        : `Order #${order.orderNumber} • ₹${order.totalAmount}`,
   });
 
 const notifyOrderCancelled = (order) =>
@@ -68,6 +75,17 @@ const notifyOrderCancelled = (order) =>
     body: `Order #${order.orderNumber} was cancelled by the customer`,
   });
 
+// USER accept / reject korle STORE ke
+const notifyStorePriceResponse = (order, accepted) =>
+  notifyStore({
+    order,
+    type: accepted ? "PRICE_ACCEPTED" : "PRICE_REJECTED",
+    title: accepted ? "Price Accepted ✅" : "Price Declined",
+    body: accepted
+      ? `Customer accepted the price for order #${order.orderNumber} • ₹${order.totalAmount}`
+      : `Customer declined the price for order #${order.orderNumber}. Please send a new estimate.`,
+  });
+
 const buildUserNotification = (order) => {
   const n = order.orderNumber;
   switch (order.status) {
@@ -75,7 +93,10 @@ const buildUserNotification = (order) => {
       return {
         type: "ORDER_PLACED",
         title: "Order Placed 🎉",
-        body: `Your order #${n} has been placed successfully.`,
+        body:
+          order.priceStatus === "AWAITING_QUOTE"
+            ? `Your order #${n} has been placed. ${order.storeName || "The store"} will share the estimated price soon.`
+            : `Your order #${n} has been placed successfully.`,
       };
     case "CONFIRMED":
       return {
@@ -111,11 +132,9 @@ const buildUserNotification = (order) => {
   }
 };
 
-const notifyUserOrderStatus = async (order) => {
+// USER ke in-app + push pathay (status ba price quote duto-r jonno)
+const sendUserNotification = async (order, content) => {
   try {
-    const content = buildUserNotification(order);
-    if (!content) return;
-
     // populateUser: true hole userId object hoye jay
     const userId = order.userId?._id || order.userId;
 
@@ -138,6 +157,7 @@ const notifyUserOrderStatus = async (order) => {
         orderId: String(order._id),
         orderNumber: String(order.orderNumber),
         status: String(order.status),
+        priceStatus: String(order.priceStatus || "NOT_REQUIRED"),
         type: content.type,
       },
       tokens: user.fcmTokens,
@@ -156,9 +176,23 @@ const notifyUserOrderStatus = async (order) => {
       );
     }
   } catch (err) {
-    console.error("notifyUserOrderStatus error:", err);
+    console.error(`sendUserNotification (${content.type}) error:`, err);
   }
 };
+
+const notifyUserOrderStatus = async (order) => {
+  const content = buildUserNotification(order);
+  if (!content) return;
+  return sendUserNotification(order, content);
+};
+
+// store estimate pathale USER ke
+const notifyUserPriceQuote = (order) =>
+  sendUserNotification(order, {
+    type: "PRICE_QUOTED",
+    title: "Price Estimate Received 💰",
+    body: `${order.storeName || "The store"} sent an estimated price of ₹${order.quote?.total} for order #${order.orderNumber}. Please accept or decline.`,
+  });
 
 // ===================== OFFER BANNER -> shudhu oi store visit kora USER =====================
 const USER_BATCH_SIZE = 500;
@@ -317,5 +351,7 @@ module.exports = {
   notifyNewOrder,
   notifyOrderCancelled,
   notifyUserOrderStatus,
+  notifyUserPriceQuote,
+  notifyStorePriceResponse,
   notifyUsersNewOffer,
 };

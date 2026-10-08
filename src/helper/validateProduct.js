@@ -16,7 +16,7 @@ const buildStock = (input = {}) => {
   return {
     openingStock,
     currentStock: openingStock,
-    lowStockThreshold: Number(input.lowStockThreshold ?? 0), 
+    lowStockThreshold: Number(input.lowStockThreshold ?? 0),
   };
 };
 
@@ -26,29 +26,50 @@ const hasAttribute = (raw = {}) => !!(raw.size || raw.weight || raw.height);
 const isEmptySizeVariant = (raw = {}) =>
   !hasAttribute(raw) && !raw.sku && isBlank(raw.mrp) && isBlank(raw.offerPrice);
 
-// MRP required, offerPrice optional. offerPrice na thakle = mrp
+// MRP optional. MRP khali + offerPrice khali = "price on request" (store order-er por estimate dibe).
+// offerPrice dile MRP lagbe, ar offerPrice <= MRP hote hobe.
 const validatePricing = (raw, errors, path) => {
   const prefix = path ? `${path}.` : "";
-  if (isBlank(raw.mrp)) {
-    errors.push({ field: `${prefix}mrp`, message: "MRP is required" });
-  } else if (Number.isNaN(Number(raw.mrp)) || Number(raw.mrp) < 0) {
+  const hasMrp = !isBlank(raw.mrp);
+  const hasOffer = !isBlank(raw.offerPrice);
+
+  if (hasMrp && (Number.isNaN(Number(raw.mrp)) || Number(raw.mrp) < 0)) {
     errors.push({
       field: `${prefix}mrp`,
       message: "MRP must be a valid number >= 0",
     });
   }
-  if (!isBlank(raw.offerPrice) && !isBlank(raw.mrp)) {
-    if (Number(raw.offerPrice) > Number(raw.mrp)) {
-      errors.push({
-        field: `${prefix}offerPrice`,
-        message: "Offer price cannot be greater than MRP",
-      });
-    }
+
+  if (
+    hasOffer &&
+    (Number.isNaN(Number(raw.offerPrice)) || Number(raw.offerPrice) < 0)
+  ) {
+    errors.push({
+      field: `${prefix}offerPrice`,
+      message: "Offer price must be a valid number >= 0",
+    });
+  }
+
+  if (hasOffer && !hasMrp) {
+    errors.push({
+      field: `${prefix}mrp`,
+      message: "Enter MRP, or clear Offer Price to keep price on request",
+    });
+  }
+
+  if (hasOffer && hasMrp && Number(raw.offerPrice) > Number(raw.mrp)) {
+    errors.push({
+      field: `${prefix}offerPrice`,
+      message: "Offer price cannot be greater than MRP",
+    });
   }
 };
 
+// MRP nai -> mrp ar offerPrice duto-i null (price on request).
+// MRP ache, offerPrice nai -> offerPrice = mrp.
 const resolvePrices = (raw) => {
-  const mrp = toNum(raw.mrp);
+  if (isBlank(raw.mrp)) return { mrp: null, offerPrice: null };
+  const mrp = Number(raw.mrp);
   const offerPrice = isBlank(raw.offerPrice) ? mrp : Number(raw.offerPrice);
   return { mrp, offerPrice };
 };

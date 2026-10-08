@@ -18,10 +18,10 @@ const {
   pickTierPrice,
   getNextTier,
 } = require("../helper/priceTiers.js");
-const {
-  AVAILABLE_STORE_FILTER,
-  getAvailableStoreIds,
-} = require("../helper/storeAvailability.js");
+// [STORE] inactive / unverified store hide
+const { AVAILABLE_STORE_FILTER } = require("../helper/storeAvailability.js");
+// [QUOTE] price on request
+const { hasPrice } = require("../helper/priceQuote.js");
 
 // ===================== HELPERS =====================
 
@@ -53,6 +53,7 @@ const handleError = (res, error, label) => {
 };
 
 // [TIER] quantity dhore tier price snapshot e boshay
+// [QUOTE] price na thakle offerPrice / mrp null thakbe
 const toSnapshot = (product, source, quantity) => ({
   name: product.name,
   productCode: product.productCode,
@@ -62,13 +63,16 @@ const toSnapshot = (product, source, quantity) => ({
   size: source.size,
   weight: source.weight,
   height: source.height,
-  mrp: source.mrp,
-  offerPrice: getUnitPrice(
-    product,
-    source.variantId ?? null,
-    source.offerPrice,
-    quantity,
-  ),
+  mrp: hasPrice(source.mrp) ? source.mrp : null,
+  offerPrice: (() => {
+    const p = getUnitPrice(
+      product,
+      source.variantId ?? null,
+      source.offerPrice,
+      quantity,
+    );
+    return hasPrice(p) ? p : null;
+  })(),
 });
 
 const newSummary = () => ({
@@ -77,15 +81,19 @@ const newSummary = () => ({
   discount: 0,
   totalAmount: 0,
   hasUnavailableItems: false,
+  hasPriceOnRequestItems: false,
 });
 
 const finalizeSummary = (s) => {
   s.totalMrp = round2(s.totalMrp);
   s.totalAmount = round2(s.totalAmount);
-  s.discount = round2(s.totalMrp - s.totalAmount);
+  s.discount = round2(Math.max(0, s.totalMrp - s.totalAmount));
   return s;
 };
 
+// cart ke store wise group kore live product+variant data shoho response banay.
+// inactive / unverified store er item default e hide hoy
+// (hideUnavailableStores = false dile dekhabe, unavailable flag shoho)
 const serializeCart = async (cart, { hideUnavailableStores = true } = {}) => {
   if (!cart || cart.items.length === 0) {
     return {
@@ -150,10 +158,10 @@ const serializeCart = async (cart, { hideUnavailableStores = true } = {}) => {
     const inStock = !trackStock || Boolean(liveSource && liveSource.stock > 0);
     const isAvailable = Boolean(
       liveProduct?.isActive &&
-      liveProduct?.isVerified &&
-      liveSource &&
-      storeAvailable &&
-      inStock,
+        liveProduct?.isVerified &&
+        liveSource &&
+        storeAvailable &&
+        inStock,
     );
 
     // [STOCK] quantity cap shudhu stock managed product e
@@ -168,13 +176,22 @@ const serializeCart = async (cart, { hideUnavailableStores = true } = {}) => {
     const offerPrice = isAvailable
       ? pickTierPrice(tiers, cappedQuantity, liveSource.offerPrice)
       : item.offerPrice;
-    const lineTotal = round2(offerPrice * cappedQuantity);
+
+    // [QUOTE] price nai -> order er por store estimate dibe, total e dhora hoy na
+    const priceOnRequest = !hasPrice(offerPrice);
+    const lineTotal = priceOnRequest
+      ? null
+      : round2(offerPrice * cappedQuantity);
 
     for (const s of [group.summary, overall]) {
       if (isAvailable) {
         s.totalItems += cappedQuantity;
-        s.totalMrp += mrp * cappedQuantity;
-        s.totalAmount += lineTotal;
+        if (priceOnRequest) {
+          s.hasPriceOnRequestItems = true;
+        } else {
+          s.totalMrp += (hasPrice(mrp) ? mrp : offerPrice) * cappedQuantity;
+          s.totalAmount += lineTotal;
+        }
       } else {
         s.hasUnavailableItems = true;
       }
@@ -193,9 +210,10 @@ const serializeCart = async (cart, { hideUnavailableStores = true } = {}) => {
       weight: isAvailable ? liveSource.weight : item.weight,
       height: isAvailable ? liveSource.height : item.height,
       quantity: item.quantity,
-      mrp,
-      offerPrice,
+      mrp: hasPrice(mrp) ? mrp : null,
+      offerPrice: priceOnRequest ? null : offerPrice,
       lineTotal,
+      priceOnRequest,
       isAvailable,
       priceChanged: isAvailable && offerPrice !== item.offerPrice,
       // [TIER] user app e tier list + "aro X ta nile Y price" hint
@@ -265,9 +283,10 @@ const addToCart = async (req, res) => {
       .select("storeName")
       .lean();
     if (!store) {
-      return res
-        .status(400)
-        .json({ success: false, message: "Store is currently unavailable" });
+      return res.status(400).json({
+        success: false,
+        message: "This store is not present in this application",
+      });
     }
 
     const cart = await CartModel.findOneAndUpdate(

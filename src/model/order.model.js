@@ -27,10 +27,12 @@ const orderItemSchema = new mongoose.Schema({
   size: { type: String, default: null },
   weight: { type: String, default: null },
   height: { type: String, default: null },
-  mrp: { type: Number, required: true, min: 0 },
-  offerPrice: { type: Number, required: true, min: 0 },
+  // price-on-request item e checkout-er somoy null, user quote accept korle fill hoy
+  mrp: { type: Number, default: null, min: 0 },
+  offerPrice: { type: Number, default: null, min: 0 },
   quantity: { type: Number, required: true, min: 1 },
-  lineTotal: { type: Number, required: true, min: 0 },
+  lineTotal: { type: Number, default: null, min: 0 },
+  priceOnRequest: { type: Boolean, default: false },
 });
 
 const deliveryAddressSchema = new mongoose.Schema(
@@ -51,6 +53,42 @@ const statusHistorySchema = new mongoose.Schema(
   {
     status: { type: String, enum: ORDER_STATUSES, required: true },
     changedBy: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
+    note: { type: String, default: null },
+    at: { type: Date, default: Date.now },
+  },
+  { _id: false },
+);
+
+// store er pathano estimated price
+const quoteSchema = new mongoose.Schema(
+  {
+    items: [
+      new mongoose.Schema(
+        {
+          itemId: { type: mongoose.Schema.Types.ObjectId, required: true },
+          unitPrice: { type: Number, required: true, min: 0 },
+        },
+        { _id: false },
+      ),
+    ],
+    total: { type: Number, min: 0 },
+    note: { type: String, default: null },
+    quotedBy: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
+    quotedAt: { type: Date },
+  },
+  { _id: false },
+);
+
+const priceHistorySchema = new mongoose.Schema(
+  {
+    action: {
+      type: String,
+      enum: ["QUOTED", "ACCEPTED", "REJECTED"],
+      required: true,
+    },
+    byRole: { type: String, enum: ["STORE", "USER"] },
+    by: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
+    total: { type: Number },
     note: { type: String, default: null },
     at: { type: Date, default: Date.now },
   },
@@ -106,6 +144,15 @@ const orderSchema = new mongoose.Schema(
     status: { type: String, enum: ORDER_STATUSES, default: "PENDING" },
     statusHistory: [statusHistorySchema],
 
+    // price-on-request flow
+    priceStatus: {
+      type: String,
+      enum: ["NOT_REQUIRED", "AWAITING_QUOTE", "QUOTED", "CONFIRMED"],
+      default: "NOT_REQUIRED",
+    },
+    quote: { type: quoteSchema, default: null },
+    priceHistory: { type: [priceHistorySchema], default: [] },
+
     cancelReason: { type: String, default: null },
     cancelledBy: { type: String, enum: ["USER", "STORE"], default: null },
   },
@@ -115,6 +162,7 @@ const orderSchema = new mongoose.Schema(
 orderSchema.index({ userId: 1, createdAt: -1 });
 orderSchema.index({ userId: 1, storeId: 1, createdAt: -1 });
 orderSchema.index({ storeId: 1, status: 1, createdAt: -1 });
+orderSchema.index({ storeId: 1, priceStatus: 1, createdAt: -1 });
 orderSchema.index({ checkoutId: 1 });
 
 orderSchema.pre("save", async function () {

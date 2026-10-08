@@ -76,6 +76,28 @@ const updateDeliveryDateSchema = z.object({
   expectedDeliveryDate: deliveryDateSchema,
 });
 
+// ---- Price on request: store estimate pathay ----
+const submitQuoteSchema = z.object({
+  items: z
+    .array(
+      z.object({
+        itemId: objectIdSchema,
+        unitPrice: z.coerce
+          .number({ invalid_type_error: "Price must be a number" })
+          .positive("Price must be greater than 0")
+          .max(10000000, "Price is too large"),
+      }),
+    )
+    .min(1, "At least one item price is required"),
+  note: z.string().trim().max(300).optional(),
+});
+
+// ---- Price on request: user accept / reject ----
+const respondQuoteSchema = z.object({
+  action: z.enum(["ACCEPT", "REJECT"]),
+  reason: z.string().trim().max(300).optional(),
+});
+
 module.exports = {
   ORDER_STATUSES,
   cartCheckoutSchema,
@@ -83,4 +105,6 @@ module.exports = {
   cancelOrderSchema,
   updateOrderStatusSchema,
   updateDeliveryDateSchema,
+  submitQuoteSchema,
+  respondQuoteSchema,
 };

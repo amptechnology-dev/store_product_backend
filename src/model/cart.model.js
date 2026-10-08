@@ -37,8 +37,9 @@ const cartItemSchema = new mongoose.Schema(
     productCode: { type: String },
     image: { type: String, default: null },
     unit: { type: String },
-    mrp: { type: Number, required: true, min: 0 },
-    offerPrice: { type: Number, required: true, min: 0 },
+    // price on request product e null thakbe (store order er por estimate dibe)
+    mrp: { type: Number, default: null, min: 0 },
+    offerPrice: { type: Number, default: null, min: 0 },
   },
   { timestamps: true },
 );

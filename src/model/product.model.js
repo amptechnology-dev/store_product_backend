@@ -39,12 +39,11 @@ const sizeVariantSchema = new mongoose.Schema(
     size: { type: String, trim: true },
     weight: { type: String, trim: true },
     height: { type: String, trim: true },
+    // MRP optional: na dile "price on request"
     mrp: {
       type: Number,
-      required: [true, "MRP is required"],
       min: [0, "MRP must be >= 0"],
     },
-    // optional: na dile controller/validator mrp set kore dey
     offerPrice: {
       type: Number,
       min: [0, "Offer price must be >= 0"],
@@ -71,13 +70,10 @@ const variantSchema = new mongoose.Schema(
     weight: { type: String, trim: true },
     height: { type: String, trim: true },
 
-    // required ONLY when this variant has no nested sizeVariants
+    // MRP optional: na dile "price on request"
     mrp: {
       type: Number,
       min: [0, "MRP must be >= 0"],
-      required: function () {
-        return !this.sizeVariants || this.sizeVariants.length === 0;
-      },
     },
     offerPrice: {
       type: Number,

@@ -10,10 +10,12 @@ const {
   getMyOrdersByStore,
   getMyOrderById,
   cancelMyOrder,
+  respondToQuote,
   getStoreOrders,
   getStoreOrderById,
   updateOrderStatus,
   updateDeliveryDate,
+  submitQuote,
 } = require("../controller/order.controller.js");
 
 // ---------- USER ----------
@@ -32,6 +34,13 @@ router.patch(
   verifyJwt,
   authorize("USER"),
   cancelMyOrder,
+);
+// price estimate accept / reject
+router.patch(
+  "/my-orders/:orderId/quote",
+  verifyJwt,
+  authorize("USER"),
+  respondToQuote,
 );
 
 // ---------- STORE ----------
@@ -53,6 +62,13 @@ router.patch(
   verifyJwt,
   authorize("STORE"),
   updateDeliveryDate,
+);
+// price estimate pathano
+router.patch(
+  "/store-orders/:orderId/quote",
+  verifyJwt,
+  authorize("STORE"),
+  submitQuote,
 );
 
 module.exports = router;

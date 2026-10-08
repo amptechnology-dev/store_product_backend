@@ -31,11 +31,16 @@ const {
   productHasTiers,
   getMinTierPrice,
 } = require("../helper/priceTiers.js");
+// [STORE] inactive / unverified store hide
 const {
   AVAILABLE_STORE_FILTER,
-  isStoreAvailable,
   sendStoreUnavailable,
 } = require("../helper/storeAvailability.js");
+// [QUOTE] price on request
+const {
+  findOfferWithoutMrp,
+  isPriceOnRequestProduct,
+} = require("../helper/priceQuote.js");
 
 const escapeRegex = (str = "") => str.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
@@ -54,6 +59,19 @@ const stripStockFields = (data) => {
     (v.sizeVariants || []).forEach(zeroStock);
   });
 };
+
+// [QUOTE] offer price ache kintu MRP nai -> error response
+const offerWithoutMrpResponse = (res) =>
+  res.status(400).json({
+    success: false,
+    message: "Validation failed",
+    errors: [
+      {
+        field: "offerPrice",
+        message: "Enter MRP, or clear Offer Price to keep price on request",
+      },
+    ],
+  });
 
 // ---------- Reusable aggregation stage: flatten offerPrice from variants + nested sizeVariants ----------
 const buildOfferPriceStages = () => [
@@ -203,6 +221,10 @@ const createProduct = async (req, res) => {
     }
 
     const parsedData = createProductSchema.parse(body);
+
+    // [QUOTE] offer price dile MRP lagbe. MRP khali + offer khali = "price on request"
+    if (findOfferWithoutMrp(body)) return offerWithoutMrpResponse(res);
+
     const userId = req.user?._id || req.user?.id;
     if (!userId) {
       return res.status(401).json({ success: false, message: "Unauthorized" });
@@ -393,8 +415,8 @@ const getAllProducts = async (req, res) => {
 
     if (search) {
       matchStage.$or = [
-        { name: { $regex: search, $options: "i" } },
-        { productCode: { $regex: search, $options: "i" } },
+        { name: { $regex: escapeRegex(search), $options: "i" } },
+        { productCode: { $regex: escapeRegex(search), $options: "i" } },
       ];
     }
 
@@ -568,6 +590,9 @@ const updateProduct = async (req, res) => {
 
     const parsedData = updateProductSchema.parse(body);
 
+    // [QUOTE] offer price dile MRP lagbe. MRP khali + offer khali = "price on request"
+    if (findOfferWithoutMrp(body)) return offerWithoutMrpResponse(res);
+
     // sudhu name change hole, ar SAME STORE-er moddhe duplicate check
     if (parsedData.name) {
       const trimmedName = parsedData.name.trim();
@@ -717,6 +742,7 @@ const updateProduct = async (req, res) => {
         });
       }
 
+      // [QUOTE] data te mrp / offerPrice null thakle (price on request) purono price muche jabe
       updateData = {
         ...updateData,
         ...data,
@@ -1011,8 +1037,9 @@ const allProductWithStore = async (req, res) => {
 const PUBLIC_STORE_FIELDS =
   "storeName storeType storeUniqueId images address lat long contactNo whatsappNo supportNo email description timingByDay isFeatured";
 
+// [QUOTE] mrp offerPrice add kora hoyeche (simple product ke vul kore "price on request" na dhorar jonno)
 const PRODUCT_LIST_FIELDS =
-  "name productCode images description unit variants priceTiers deliveryTime storeId categoryId createdAt";
+  "name productCode images description unit mrp offerPrice variants priceTiers deliveryTime storeId categoryId createdAt";
 
 const SORT_MAP = {
   newest: { createdAt: -1 },
@@ -1039,6 +1066,7 @@ const getPublicStore = (storeUniqueId) =>
     .lean();
 
 // [TIER] hasTierPricing + minTierPrice jog kora hoyeche (user app er jonno)
+// [QUOTE] priceOnRequest flag
 const formatProduct = ({ categoryId, ...product }) => ({
   ...product,
   categoryId: categoryId?._id ?? null,
@@ -1047,6 +1075,7 @@ const formatProduct = ({ categoryId, ...product }) => ({
     : null,
   hasTierPricing: productHasTiers(product),
   minTierPrice: getMinTierPrice(product),
+  priceOnRequest: isPriceOnRequestProduct(product),
 });
 
 const fetchStoreProducts = async (store, query, categoryId) => {
@@ -1266,7 +1295,7 @@ const getStoreProducts = async (req, res) => {
 
     let products = await ProductModel.find(match)
       .select(
-        `${PRODUCT_LIST_FIELDS} mrp offerPrice stock hasVariants hasColor hasStockManagement reviews averageRating totalReviews`,
+        `${PRODUCT_LIST_FIELDS} stock hasVariants hasColor hasStockManagement reviews averageRating totalReviews`,
       )
       .populate("categoryId", "name")
       .populate({ path: "reviews.userId", select: "name picture" })
@@ -1366,7 +1395,7 @@ const getStoreProductsByCategory = async (req, res) => {
     }
 
     const store = await getPublicStore(storeUniqueId);
-   if (!store) return sendStoreUnavailable(res);
+    if (!store) return sendStoreUnavailable(res);
 
     const category = await CategoryModel.findOne({
       _id: categoryId,
@@ -1405,7 +1434,7 @@ const getStoreSingleProduct = async (req, res) => {
     }
 
     const store = await getPublicStore(storeUniqueId);
-   if (!store) return sendStoreUnavailable(res);
+    if (!store) return sendStoreUnavailable(res);
 
     const product = await ProductModel.findOne({
       _id: productId,

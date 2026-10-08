@@ -9,6 +9,8 @@ const {
   cancelOrderSchema,
   updateOrderStatusSchema,
   updateDeliveryDateSchema,
+  submitQuoteSchema,
+  respondQuoteSchema,
 } = require("../schema/order.schema.js");
 const { resolveLineSource } = require("../helper/resolveVariant.js");
 const {
@@ -22,15 +24,24 @@ const {
   notifyNewOrder,
   notifyOrderCancelled,
   notifyUserOrderStatus,
+  notifyUserPriceQuote,
+  notifyStorePriceResponse,
 } = require("../helper/notification.helper.js");
-const {
-  AVAILABLE_STORE_FILTER,
-  getAvailableStoreIds,
-} = require("../helper/storeAvailability.js");
 // [STOCK] product er stock management flag check
 const { isStockManaged } = require("../helper/storeSettings.js");
 // [TIER] quantity based pricing
 const { getUnitPrice } = require("../helper/priceTiers.js");
+// [STORE] inactive / unverified store hide
+const {
+  AVAILABLE_STORE_FILTER,
+  getAvailableStoreIds,
+} = require("../helper/storeAvailability.js");
+// [QUOTE] price on request
+const {
+  hasPrice,
+  computeTotals,
+  QUOTE_PENDING_STATUSES,
+} = require("../helper/priceQuote.js");
 
 // ===================== CONSTANTS / HELPERS =====================
 const ORDER_STATUSES = [
@@ -209,6 +220,8 @@ const attemptStoreCheckout = async ({
       source.offerPrice,
       line.quantity,
     );
+    // [QUOTE] price nai -> store estimate dibe
+    const priceOnRequest = !hasPrice(unitPrice);
 
     // [STOCK] stock management on hole-i stock check + minus hoy, nahole shudhu order hoy
     if (isStockManaged(product)) {
@@ -273,10 +286,11 @@ const attemptStoreCheckout = async ({
       size: source.size,
       weight: source.weight,
       height: source.height,
-      mrp: source.mrp,
-      offerPrice: unitPrice, // [TIER]
+      priceOnRequest,
+      mrp: hasPrice(source.mrp) ? source.mrp : priceOnRequest ? null : unitPrice,
+      offerPrice: priceOnRequest ? null : unitPrice, // [TIER]
       quantity: line.quantity,
-      lineTotal: round2(unitPrice * line.quantity), // [TIER]
+      lineTotal: priceOnRequest ? null : round2(unitPrice * line.quantity), // [TIER]
     });
   }
 
@@ -286,14 +300,12 @@ const attemptStoreCheckout = async ({
     return { success: false, storeId, outOfStockLines };
   }
 
-  const totalItems = orderItems.reduce((sum, i) => sum + i.quantity, 0);
-  const totalMrp = round2(
-    orderItems.reduce((sum, i) => sum + i.mrp * i.quantity, 0),
-  );
-  const totalAmount = round2(
-    orderItems.reduce((sum, i) => sum + i.lineTotal, 0),
-  );
-  const discount = round2(totalMrp - totalAmount);
+  // [QUOTE] price-less item totals e dhora hoy na
+  const { totalItems, totalMrp, totalAmount, discount } =
+    computeTotals(orderItems);
+  const priceStatus = orderItems.some((i) => i.priceOnRequest)
+    ? "AWAITING_QUOTE"
+    : "NOT_REQUIRED";
 
   // ---------- order create fail korle stock ferot dao ----------
   let order;
@@ -308,6 +320,7 @@ const attemptStoreCheckout = async ({
       totalMrp,
       discount,
       totalAmount,
+      priceStatus,
       deliveryAddress,
       note,
       paymentMethod,
@@ -484,7 +497,6 @@ const checkout = async (req, res) => {
       );
     }
 
-    // (age ei check ta duibar chhilo, ekbar rakhlam)
     if (createdOrders.length === 0) {
       return res.status(409).json({
         success: false,
@@ -555,7 +567,6 @@ const buyNow = async (req, res) => {
     }
 
     notifyNewOrder(result.order);
-
     notifyUserOrderStatus(result.order);
 
     return res.status(201).json({
@@ -568,9 +579,9 @@ const buyNow = async (req, res) => {
   }
 };
 
-// ===================== 3. GET MY ORDERS (flat list) =====================
-// GET /api/order/my-orders
-
+// ===================== INTERNAL: orders grouped by store =====================
+// user er order, store wise group. Inactive / unverified store er order baad.
+// options: { status, ordersPerStore }
 const getOrdersGroupedByStore = async (
   userId,
   { status, ordersPerStore } = {},
@@ -617,6 +628,8 @@ const getOrdersGroupedByStore = async (
   }));
 };
 
+// ===================== 3. GET MY ORDERS (flat list) =====================
+// GET /api/order/my-orders
 const getMyOrders = async (req, res) => {
   try {
     const userId = getUserId(req);
@@ -658,6 +671,8 @@ const getMyOrders = async (req, res) => {
   }
 };
 
+// ===================== 4. GET MY ORDERS GROUPED BY STORE =====================
+// GET /api/order/my-orders/by-store
 const getMyOrdersByStore = async (req, res) => {
   try {
     const userId = getUserId(req);
@@ -767,6 +782,139 @@ const cancelMyOrder = async (req, res) => {
     });
   } catch (error) {
     return handleError(res, error, "Cancel My Order Error");
+  }
+};
+
+// ===================== 6b. USER: ACCEPT / REJECT PRICE ESTIMATE =====================
+// PATCH /api/order/my-orders/:orderId/quote
+// body: { action: "ACCEPT" | "REJECT", reason? }
+const respondToQuote = async (req, res) => {
+  try {
+    const { orderId } = req.params;
+    const userId = getUserId(req);
+
+    if (!mongoose.isValidObjectId(orderId)) {
+      return res
+        .status(400)
+        .json({ success: false, message: "Invalid order id" });
+    }
+
+    const { action, reason } = respondQuoteSchema.parse(req.body);
+
+    const existing = await OrderModel.findOne({ _id: orderId, userId }).lean();
+    if (!existing) {
+      return res
+        .status(404)
+        .json({ success: false, message: "Order not found" });
+    }
+
+    if (
+      existing.status !== "PENDING" ||
+      existing.priceStatus !== "QUOTED" ||
+      !existing.quote
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: "There is no price estimate waiting for your response",
+      });
+    }
+
+    const now = new Date();
+    let update;
+
+    if (action === "ACCEPT") {
+      const priceMap = new Map(
+        existing.quote.items.map((q) => [String(q.itemId), q.unitPrice]),
+      );
+
+      // quote-er price item e fixed hoy
+      const items = existing.items.map((i) => {
+        if (!i.priceOnRequest) return i;
+        const unit = priceMap.get(String(i._id));
+        return {
+          ...i,
+          mrp: unit,
+          offerPrice: unit,
+          lineTotal: round2(unit * i.quantity),
+        };
+      });
+
+      if (items.some((i) => !hasPrice(i.offerPrice))) {
+        return res.status(409).json({
+          success: false,
+          message:
+            "Price estimate is incomplete, please ask the store to resend",
+        });
+      }
+
+      const totals = computeTotals(items);
+      update = {
+        $set: {
+          items,
+          totalMrp: totals.totalMrp,
+          discount: totals.discount,
+          totalAmount: totals.totalAmount,
+          priceStatus: "CONFIRMED",
+        },
+        $push: {
+          priceHistory: {
+            action: "ACCEPTED",
+            byRole: "USER",
+            by: userId,
+            total: totals.totalAmount,
+            at: now,
+          },
+        },
+      };
+    } else {
+      // reject: quote muche jay, item price abar blank
+      update = {
+        $set: { priceStatus: "AWAITING_QUOTE", quote: null },
+        $push: {
+          priceHistory: {
+            action: "REJECTED",
+            byRole: "USER",
+            by: userId,
+            total: existing.quote.total,
+            note: reason || null,
+            at: now,
+          },
+        },
+      };
+    }
+
+    // quotedAt match: store ei majhe quote bodle dile purono quote accept hobe na
+    const order = await OrderModel.findOneAndUpdate(
+      {
+        _id: orderId,
+        userId,
+        status: "PENDING",
+        priceStatus: "QUOTED",
+        "quote.quotedAt": existing.quote.quotedAt,
+      },
+      update,
+      { new: true },
+    ).lean();
+
+    if (!order) {
+      return res.status(409).json({
+        success: false,
+        message: "The estimate has just changed, please refresh",
+      });
+    }
+
+    notifyStorePriceResponse(order, action === "ACCEPT");
+
+    return res.status(200).json({
+      success: true,
+      message:
+        action === "ACCEPT"
+          ? "Price accepted. Your order total is now fixed."
+          : "Price declined. The store will send a new estimate.",
+      order,
+    });
+  } catch (error) {
+    return handleError(res, error, "Respond To Quote Error");
   }
 };
 
@@ -902,7 +1050,7 @@ const updateOrderStatus = async (req, res) => {
       updateOrderStatusSchema.parse(req.body);
 
     const existing = await OrderModel.findById(orderId)
-      .select("storeId status expectedDeliveryDate")
+      .select("storeId status expectedDeliveryDate priceStatus")
       .lean();
     if (!existing) {
       return res
@@ -924,6 +1072,18 @@ const updateOrderStatus = async (req, res) => {
           ALLOWED_TRANSITIONS[existing.status].length === 0
             ? `Order status cannot be changed once it is ${existing.status}`
             : `Cannot change status from ${existing.status} to ${status}`,
+      });
+    }
+
+    // [QUOTE] price estimate user accept na korle confirm kora jabe na
+    if (
+      status === "CONFIRMED" &&
+      QUOTE_PENDING_STATUSES.includes(existing.priceStatus)
+    ) {
+      return res.status(400).json({
+        success: false,
+        message:
+          "Price estimate must be accepted by the customer before confirming this order",
       });
     }
 
@@ -956,6 +1116,11 @@ const updateOrderStatus = async (req, res) => {
 
     const order = await transitionOrder({
       orderId,
+      // [QUOTE] race guard: ei majhe user quote reject korle confirm hobe na
+      filter:
+        status === "CONFIRMED"
+          ? { priceStatus: { $nin: QUOTE_PENDING_STATUSES } }
+          : {},
       status,
       note,
       userId,
@@ -1050,6 +1215,139 @@ const updateDeliveryDate = async (req, res) => {
   }
 };
 
+// ===================== 11. STORE: SEND PRICE ESTIMATE =====================
+// PATCH /api/order/store-orders/:orderId/quote
+// body: { items: [{ itemId, unitPrice }], note? }
+const submitQuote = async (req, res) => {
+  try {
+    const { orderId } = req.params;
+    const userId = getUserId(req);
+
+    if (!mongoose.isValidObjectId(orderId)) {
+      return res
+        .status(400)
+        .json({ success: false, message: "Invalid order id" });
+    }
+
+    const { items: quoteItems, note } = submitQuoteSchema.parse(req.body);
+
+    const existing = await OrderModel.findById(orderId)
+      .select("storeId status priceStatus items")
+      .lean();
+    if (!existing) {
+      return res
+        .status(404)
+        .json({ success: false, message: "Order not found" });
+    }
+
+    if (!(await isStoreOwner(existing.storeId, userId))) {
+      return res.status(403).json({
+        success: false,
+        message: "Not authorized to update this order",
+      });
+    }
+
+    if (existing.status !== "PENDING") {
+      return res.status(400).json({
+        success: false,
+        message: `Price cannot be set once order is ${existing.status}`,
+      });
+    }
+
+    if (!QUOTE_PENDING_STATUSES.includes(existing.priceStatus)) {
+      return res.status(400).json({
+        success: false,
+        message: "This order does not need a price estimate",
+      });
+    }
+
+    // jei item gulo-r price nai, shob gulo-r price lagbe (extra / duplicate / missing noy)
+    const neededIds = new Set(
+      existing.items.filter((i) => i.priceOnRequest).map((i) => String(i._id)),
+    );
+    const sentIds = quoteItems.map((q) => String(q.itemId));
+    if (
+      new Set(sentIds).size !== sentIds.length ||
+      sentIds.length !== neededIds.size ||
+      !sentIds.every((id) => neededIds.has(id))
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: "Please enter a price for every item that needs an estimate",
+      });
+    }
+
+    const priceMap = new Map(
+      quoteItems.map((q) => [String(q.itemId), round2(q.unitPrice)]),
+    );
+
+    const total = round2(
+      existing.items.reduce((sum, i) => {
+        const unit = i.priceOnRequest
+          ? priceMap.get(String(i._id))
+          : i.offerPrice;
+        return sum + unit * i.quantity;
+      }, 0),
+    );
+
+    const quotedAt = new Date();
+
+    // atomic: ei majhe cancel / confirm hoye gele update hobe na
+    const order = await OrderModel.findOneAndUpdate(
+      {
+        _id: orderId,
+        status: "PENDING",
+        priceStatus: { $in: QUOTE_PENDING_STATUSES },
+      },
+      {
+        $set: {
+          priceStatus: "QUOTED",
+          quote: {
+            items: quoteItems.map((q) => ({
+              itemId: q.itemId,
+              unitPrice: priceMap.get(String(q.itemId)),
+            })),
+            total,
+            note: note || null,
+            quotedBy: userId,
+            quotedAt,
+          },
+        },
+        $push: {
+          priceHistory: {
+            action: "QUOTED",
+            byRole: "STORE",
+            by: userId,
+            total,
+            note: note || null,
+            at: quotedAt,
+          },
+        },
+      },
+      { new: true },
+    )
+      .populate("userId", CUSTOMER_FIELDS)
+      .lean();
+
+    if (!order) {
+      return res.status(409).json({
+        success: false,
+        message: "Order status has just changed, please refresh",
+      });
+    }
+
+    notifyUserPriceQuote(order);
+
+    return res.status(200).json({
+      success: true,
+      message: "Price estimate sent to the customer",
+      order,
+    });
+  } catch (error) {
+    return handleError(res, error, "Submit Quote Error");
+  }
+};
+
 module.exports = {
   checkout,
   buyNow,
@@ -1058,8 +1356,10 @@ module.exports = {
   getOrdersGroupedByStore,
   getMyOrderById,
   cancelMyOrder,
+  respondToQuote,
   getStoreOrders,
   getStoreOrderById,
   updateOrderStatus,
   updateDeliveryDate,
+  submitQuote,
 };
