@@ -31,6 +31,11 @@ const {
   productHasTiers,
   getMinTierPrice,
 } = require("../helper/priceTiers.js");
+const {
+  AVAILABLE_STORE_FILTER,
+  isStoreAvailable,
+  sendStoreUnavailable,
+} = require("../helper/storeAvailability.js");
 
 const escapeRegex = (str = "") => str.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
@@ -216,11 +221,7 @@ const createProduct = async (req, res) => {
     }
 
     const store = await StoreModel.findById(parsedData.storeId);
-    if (!store) {
-      return res
-        .status(404)
-        .json({ success: false, message: "Store not found" });
-    }
+    if (!store) return sendStoreUnavailable(res);
 
     const category = await CategoryModel.findOne({
       _id: parsedData.categoryId,
@@ -851,13 +852,28 @@ const deleteProduct = async (req, res) => {
 const getSingleProduct = async (req, res) => {
   try {
     const { id } = req.params;
+
+    if (!mongoose.isValidObjectId(id)) {
+      return res
+        .status(400)
+        .json({ success: false, message: "Invalid product id" });
+    }
+
     const product = await ProductModel.findOne({ _id: id, isActive: true })
-      .populate("storeId", "storeName storeUniqueId contactNo whatsappNo email")
+      .populate(
+        "storeId",
+        "storeName storeUniqueId contactNo whatsappNo email isActive isVerify",
+      )
       .populate("categoryId", "name");
 
     if (!product) {
       return res.status(404).json({ message: "Product not found" });
     }
+
+    if (!product.storeId?.isActive || !product.storeId?.isVerify) {
+      return sendStoreUnavailable(res);
+    }
+
     return res
       .status(200)
       .json({ message: "Product get successfully", product });
@@ -1018,7 +1034,7 @@ const toPositiveNumber = (value) => {
 };
 
 const getPublicStore = (storeUniqueId) =>
-  StoreModel.findOne({ storeUniqueId, isActive: true })
+  StoreModel.findOne({ storeUniqueId, ...AVAILABLE_STORE_FILTER })
     .select(PUBLIC_STORE_FIELDS)
     .lean();
 
@@ -1149,11 +1165,7 @@ const getStoreCategories = async (req, res) => {
     const { storeUniqueId } = req.params;
 
     const store = await getPublicStore(storeUniqueId);
-    if (!store) {
-      return res
-        .status(404)
-        .json({ success: false, message: "Store not found" });
-    }
+    if (!store) return sendStoreUnavailable(res);
 
     const match = { storeId: store._id, isActive: true };
 
@@ -1234,11 +1246,7 @@ const getStoreProducts = async (req, res) => {
     }
 
     const store = await getPublicStore(storeUniqueId);
-    if (!store) {
-      return res
-        .status(404)
-        .json({ success: false, message: "Store not found" });
-    }
+    if (!store) return sendStoreUnavailable(res);
 
     const match = {
       storeId: store._id,
@@ -1358,11 +1366,7 @@ const getStoreProductsByCategory = async (req, res) => {
     }
 
     const store = await getPublicStore(storeUniqueId);
-    if (!store) {
-      return res
-        .status(404)
-        .json({ success: false, message: "Store not found" });
-    }
+   if (!store) return sendStoreUnavailable(res);
 
     const category = await CategoryModel.findOne({
       _id: categoryId,
@@ -1401,11 +1405,7 @@ const getStoreSingleProduct = async (req, res) => {
     }
 
     const store = await getPublicStore(storeUniqueId);
-    if (!store) {
-      return res
-        .status(404)
-        .json({ success: false, message: "Store not found" });
-    }
+   if (!store) return sendStoreUnavailable(res);
 
     const product = await ProductModel.findOne({
       _id: productId,

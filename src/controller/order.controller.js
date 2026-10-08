@@ -23,6 +23,10 @@ const {
   notifyOrderCancelled,
   notifyUserOrderStatus,
 } = require("../helper/notification.helper.js");
+const {
+  AVAILABLE_STORE_FILTER,
+  getAvailableStoreIds,
+} = require("../helper/storeAvailability.js");
 // [STOCK] product er stock management flag check
 const { isStockManaged } = require("../helper/storeSettings.js");
 // [TIER] quantity based pricing
@@ -150,11 +154,18 @@ const attemptStoreCheckout = async ({
   note,
   paymentMethod,
 }) => {
-  const store = await StoreModel.findOne({ _id: storeId, isActive: true })
+  const store = await StoreModel.findOne({
+    _id: storeId,
+    ...AVAILABLE_STORE_FILTER,
+  })
     .select("storeName storeUniqueId")
     .lean();
   if (!store) {
-    return { success: false, storeId, message: "Store not found or inactive" };
+    return {
+      success: false,
+      storeId,
+      message: "This store is not present in this application",
+    };
   }
 
   const productIds = [...new Set(lines.map((l) => String(l.productId)))];
@@ -559,6 +570,53 @@ const buyNow = async (req, res) => {
 
 // ===================== 3. GET MY ORDERS (flat list) =====================
 // GET /api/order/my-orders
+
+const getOrdersGroupedByStore = async (
+  userId,
+  { status, ordersPerStore } = {},
+) => {
+  const availableStoreIds = await getAvailableStoreIds();
+
+  const match = {
+    userId: new mongoose.Types.ObjectId(userId),
+    storeId: { $in: availableStoreIds },
+  };
+  if (status) match.status = status;
+
+  const pipeline = [
+    { $match: match },
+    { $sort: { createdAt: -1, _id: -1 } },
+    {
+      $group: {
+        _id: "$storeId",
+        storeName: { $first: "$storeName" },
+        storeUniqueId: { $first: "$storeUniqueId" },
+        totalOrders: { $sum: 1 },
+        latestOrderAt: { $max: "$createdAt" },
+        orders: { $push: "$$ROOT" },
+      },
+    },
+  ];
+
+  if (ordersPerStore) {
+    pipeline.push({
+      $addFields: { orders: { $slice: ["$orders", ordersPerStore] } },
+    });
+  }
+
+  pipeline.push({ $sort: { latestOrderAt: -1 } });
+
+  const grouped = await OrderModel.aggregate(pipeline);
+
+  return grouped.map((g) => ({
+    storeId: g._id,
+    storeName: g.storeName,
+    storeUniqueId: g.storeUniqueId,
+    totalOrders: g.totalOrders,
+    orders: g.orders,
+  }));
+};
+
 const getMyOrders = async (req, res) => {
   try {
     const userId = getUserId(req);
@@ -570,7 +628,10 @@ const getMyOrders = async (req, res) => {
         .json({ success: false, message: "Invalid status" });
     }
 
-    const match = { userId };
+    const match = {
+      userId,
+      storeId: { $in: await getAvailableStoreIds() },
+    };
     if (status) match.status = status;
 
     const { pageNum, limitNum } = parsePagination(req.query);
@@ -597,8 +658,6 @@ const getMyOrders = async (req, res) => {
   }
 };
 
-// ===================== 4. GET MY ORDERS GROUPED BY STORE =====================
-// GET /api/order/my-orders/by-store
 const getMyOrdersByStore = async (req, res) => {
   try {
     const userId = getUserId(req);
@@ -610,35 +669,12 @@ const getMyOrdersByStore = async (req, res) => {
         .json({ success: false, message: "Invalid status" });
     }
 
-    const match = { userId: new mongoose.Types.ObjectId(userId) };
-    if (status) match.status = status;
-
-    const grouped = await OrderModel.aggregate([
-      { $match: match },
-      { $sort: { createdAt: -1 } },
-      {
-        $group: {
-          _id: "$storeId",
-          storeName: { $first: "$storeName" },
-          storeUniqueId: { $first: "$storeUniqueId" },
-          totalOrders: { $sum: 1 },
-          latestOrderAt: { $max: "$createdAt" },
-          orders: { $push: "$$ROOT" },
-        },
-      },
-      { $sort: { latestOrderAt: -1 } },
-    ]);
+    const stores = await getOrdersGroupedByStore(userId, { status });
 
     return res.status(200).json({
       success: true,
-      count: grouped.length,
-      stores: grouped.map((g) => ({
-        storeId: g._id,
-        storeName: g.storeName,
-        storeUniqueId: g.storeUniqueId,
-        totalOrders: g.totalOrders,
-        orders: g.orders,
-      })),
+      count: stores.length,
+      stores,
     });
   } catch (error) {
     return handleError(res, error, "Get My Orders By Store Error");
@@ -1019,6 +1055,7 @@ module.exports = {
   buyNow,
   getMyOrders,
   getMyOrdersByStore,
+  getOrdersGroupedByStore,
   getMyOrderById,
   cancelMyOrder,
   getStoreOrders,

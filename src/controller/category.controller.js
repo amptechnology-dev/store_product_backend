@@ -1,5 +1,11 @@
 const CategoryModel = require("../model/category.model.js");
 const { uploadToR2 } = require("../helper/upload.js");
+const mongoose = require("mongoose");
+const {
+  isStoreAvailable,
+  getAvailableStoreIds,
+  sendStoreUnavailable,
+} = require("../helper/storeAvailability.js");
 
 const uploadCategoryImage = async (files = []) => {
   const file = files.find((f) => f.fieldname.startsWith("image"));
@@ -56,13 +62,22 @@ const createCategory = async (req, res) => {
   }
 };
 
-// ALL CATEGORY
-
 const allCategories = async (req, res) => {
   try {
     const { storeId } = req.query;
+    const filter = {};
 
-    const filter = storeId ? { storeId } : {};
+    if (storeId) {
+      if (!mongoose.isValidObjectId(storeId)) {
+        return res.status(400).json({ message: "Invalid store id" });
+      }
+      if (!(await isStoreAvailable(storeId))) {
+        return sendStoreUnavailable(res);
+      }
+      filter.storeId = storeId;
+    } else {
+      filter.storeId = { $in: await getAvailableStoreIds() };
+    }
 
     const categories = await CategoryModel.find(filter).sort({
       createdAt: -1,
@@ -74,7 +89,6 @@ const allCategories = async (req, res) => {
     });
   } catch (error) {
     console.error(error);
-
     return res.status(500).json({
       message: "Internal server error",
     });
@@ -87,6 +101,10 @@ const singleCategory = async (req, res) => {
   try {
     const { categoryId } = req.params;
 
+    if (!mongoose.isValidObjectId(categoryId)) {
+      return res.status(400).json({ message: "Invalid category id" });
+    }
+
     const category = await CategoryModel.findById(categoryId);
 
     if (!category) {
@@ -95,12 +113,15 @@ const singleCategory = async (req, res) => {
       });
     }
 
+    if (!(await isStoreAvailable(category.storeId))) {
+      return sendStoreUnavailable(res);
+    }
+
     return res.status(200).json({
       category,
     });
   } catch (error) {
     console.error(error);
-
     return res.status(500).json({
       message: "Internal server error",
     });

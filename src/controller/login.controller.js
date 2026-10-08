@@ -191,6 +191,34 @@ const login = async (req, res) => {
       });
     }
 
+    // STORE login: store must be active and verified
+    if (user.role === "STORE") {
+      const store = await StoreModel.findOne({ userId: user._id })
+        .select("isActive isVerify")
+        .lean();
+
+      if (!store) {
+        return res.status(404).json({
+          success: false,
+          message: "Store not found for this account",
+        });
+      }
+
+      if (!store.isActive) {
+        return res.status(403).json({
+          success: false,
+          message: "Your store is inactive. Please contact with super admin.",
+        });
+      }
+
+      if (!store.isVerify) {
+        return res.status(403).json({
+          success: false,
+          message: "Your store is not verified yet. Please wait for approval.",
+        });
+      }
+    }
+
     const token = generateAuthToken(user);
     setAuthCookie(res, token);
 

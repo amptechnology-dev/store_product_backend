@@ -10,6 +10,11 @@ const {
 } = require("../schema/banner.schema.js");
 const { uploadBannerMedia } = require("../helper/productImages.js");
 const { notifyUsersNewOffer } = require("../helper/notification.helper.js");
+const {
+  isStoreAvailable,
+  getAvailableStoreIds,
+  sendStoreUnavailable,
+} = require("../helper/storeAvailability.js");
 
 const getUserId = (req) => req.user?._id || req.user?.id;
 
@@ -435,9 +440,12 @@ const deleteBanner = async (req, res) => {
 // ===================== PUBLIC =====================
 const publicGetAllBanners = async (req, res) => {
   try {
+    const availableStoreIds = await getAvailableStoreIds();
+
     const banners = await BannerModel.find({
       isActive: true,
       offerBanner: { $ne: true },
+      storeId: { $in: availableStoreIds },
     })
       .populate(BANNER_POPULATE)
       .sort({ createdAt: -1 })
@@ -454,8 +462,6 @@ const publicGetAllBanners = async (req, res) => {
   }
 };
 
-// shudhu offer banner (offerBanner: true + active)
-// GET /api/banner/public/offer-banners?storeId=&categoryId=
 const publicGetOfferBanners = async (req, res) => {
   try {
     const { storeId, categoryId } = req.query;
@@ -472,7 +478,16 @@ const publicGetOfferBanners = async (req, res) => {
     }
 
     const filter = { isActive: true, offerBanner: true };
-    if (storeId) filter.storeId = storeId;
+
+    if (storeId) {
+      if (!(await isStoreAvailable(storeId))) {
+        return sendStoreUnavailable(res);
+      }
+      filter.storeId = storeId;
+    } else {
+      filter.storeId = { $in: await getAvailableStoreIds() };
+    }
+
     if (categoryId) filter.categoryIds = categoryId;
 
     const banners = await BannerModel.find(filter)
@@ -508,7 +523,15 @@ const publicGetBannersByCategory = async (req, res) => {
     }
 
     const filter = { isActive: true };
-    if (storeId) filter.storeId = storeId;
+
+    if (storeId) {
+      if (!(await isStoreAvailable(storeId))) {
+        return sendStoreUnavailable(res);
+      }
+      filter.storeId = storeId;
+    } else {
+      filter.storeId = { $in: await getAvailableStoreIds() };
+    }
 
     // includeGeneral=true hole category-less (categoryIds khali) banner o ashbe
     if (includeGeneral === "true") {

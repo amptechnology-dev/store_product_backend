@@ -18,6 +18,10 @@ const {
   pickTierPrice,
   getNextTier,
 } = require("../helper/priceTiers.js");
+const {
+  AVAILABLE_STORE_FILTER,
+  getAvailableStoreIds,
+} = require("../helper/storeAvailability.js");
 
 // ===================== HELPERS =====================
 
@@ -43,7 +47,9 @@ const handleError = (res, error, label) => {
     });
   }
   console.error(`${label}:`, error);
-  return res.status(500).json({ success: false, message: "Internal server error" });
+  return res
+    .status(500)
+    .json({ success: false, message: "Internal server error" });
 };
 
 // [TIER] quantity dhore tier price snapshot e boshay
@@ -80,8 +86,7 @@ const finalizeSummary = (s) => {
   return s;
 };
 
-// cart ke store wise group kore live product+variant data shoho response banay
-const serializeCart = async (cart) => {
+const serializeCart = async (cart, { hideUnavailableStores = true } = {}) => {
   if (!cart || cart.items.length === 0) {
     return {
       _id: cart?._id ?? null,
@@ -102,7 +107,7 @@ const serializeCart = async (cart) => {
       )
       .lean(),
     StoreModel.find({ _id: { $in: storeIds } })
-      .select("storeName storeUniqueId images isActive")
+      .select("storeName storeUniqueId images isActive isVerify")
       .lean(),
   ]);
 
@@ -115,6 +120,10 @@ const serializeCart = async (cart) => {
   for (const item of cart.items) {
     const storeKey = String(item.storeId);
     const store = storeMap.get(storeKey);
+    const storeAvailable = Boolean(store?.isActive && store?.isVerify);
+
+    // store inactive / unverified / delete hoye gele cart list e dekhabe na
+    if (hideUnavailableStores && !storeAvailable) continue;
 
     if (!groups.has(storeKey)) {
       groups.set(storeKey, {
@@ -123,7 +132,7 @@ const serializeCart = async (cart) => {
           storeName: store?.storeName ?? item.storeName ?? null,
           storeUniqueId: store?.storeUniqueId ?? null,
           image: store?.images?.[0] ?? null,
-          isActive: Boolean(store?.isActive),
+          isActive: storeAvailable,
         },
         items: [],
         summary: newSummary(),
@@ -141,10 +150,10 @@ const serializeCart = async (cart) => {
     const inStock = !trackStock || Boolean(liveSource && liveSource.stock > 0);
     const isAvailable = Boolean(
       liveProduct?.isActive &&
-        liveProduct?.isVerified &&
-        liveSource &&
-        store?.isActive &&
-        inStock,
+      liveProduct?.isVerified &&
+      liveSource &&
+      storeAvailable &&
+      inStock,
     );
 
     // [STOCK] quantity cap shudhu stock managed product e
@@ -251,7 +260,7 @@ const addToCart = async (req, res) => {
 
     const store = await StoreModel.findOne({
       _id: product.storeId,
-      isActive: true,
+      ...AVAILABLE_STORE_FILTER,
     })
       .select("storeName")
       .lean();
