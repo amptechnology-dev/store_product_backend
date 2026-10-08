@@ -203,13 +203,13 @@ const locateStockUnit = (product, unitId) => {
     };
   }
 
-  return null; // id-tar sathe kono unit match korলো na — invalid variantId
+  return null; // id-r sathe kono unit match kore nai — invalid variantId
 };
 
 // ---------- ATOMIC stock decrement for one order line ----------
 // MongoDB-level condition (currentStock >= quantity) diye atomically check + decrement
 // kore, tai duijon user ekshathe order dile race condition hoy na — ekjon succeed
-// korবে, arekjon INSUFFICIENT_STOCK pabে.
+// korbe, arekjon INSUFFICIENT_STOCK pabe.
 const decrementStockForLine = async ({
   productId,
   variantId,
@@ -241,15 +241,24 @@ const decrementStockForLine = async ({
       { new: true },
     );
   } else {
+    // [FIX] stock condition query filter e rakha hoyeche ($elemMatch),
+    // jate stock kom hole document match-i na kore -> INSUFFICIENT_STOCK
     updated = await ProductModel.findOneAndUpdate(
-      { _id: productId, "variants._id": variantId },
+      {
+        _id: productId,
+        variants: {
+          $elemMatch: {
+            _id: variantId,
+            sizeVariants: {
+              $elemMatch: { _id: sizeVariantId, currentStock: { $gte: qty } },
+            },
+          },
+        },
+      },
       { $inc: { "variants.$[v].sizeVariants.$[sv].currentStock": -qty } },
       {
         new: true,
-        arrayFilters: [
-          { "v._id": variantId },
-          { "sv._id": sizeVariantId, "sv.currentStock": { $gte: qty } },
-        ],
+        arrayFilters: [{ "v._id": variantId }, { "sv._id": sizeVariantId }],
       },
     );
   }

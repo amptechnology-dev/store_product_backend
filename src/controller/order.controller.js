@@ -72,6 +72,14 @@ const getUserId = (req) => req.user?._id || req.user?.id;
 const round2 = (n) => Math.round((n + Number.EPSILON) * 100) / 100;
 const escapeRegex = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
+// "null" / "undefined" / "" string ke real null banay
+const cleanVariantId = (id) => {
+  if (id === undefined || id === null) return null;
+  const s = String(id).trim();
+  if (!s || s === "null" || s === "undefined") return null;
+  return id;
+};
+
 const parsePagination = (query) => {
   const pageNum = Math.max(parseInt(query.page) || 1, 1);
   const limitNum = Math.min(
@@ -191,7 +199,10 @@ const attemptStoreCheckout = async ({
   const decrementedLines = [];
   const outOfStockLines = [];
 
-  for (const line of lines) {
+  for (const rawLine of lines) {
+    // [FIX] "null" / "undefined" string variantId ke real null kora
+    const line = { ...rawLine, variantId: cleanVariantId(rawLine.variantId) };
+
     const product = productMap.get(String(line.productId));
     if (!product) {
       outOfStockLines.push({
@@ -223,7 +234,8 @@ const attemptStoreCheckout = async ({
     // [QUOTE] price nai -> store estimate dibe
     const priceOnRequest = !hasPrice(unitPrice);
 
-    // [STOCK] stock management on hole-i stock check + minus hoy, nahole shudhu order hoy
+    // [STOCK] stock management ON (hasStockManagement === true) hole-i
+    // stock check + minus hoy. OFF hole shudhu order hoy, out-of-stock hobe na.
     if (isStockManaged(product)) {
       const unit = locateStockUnit(product, line.variantId);
       if (!unit) {
@@ -359,14 +371,14 @@ const attemptStoreCheckout = async ({
 const restoreOrderStock = async (order, userId) => {
   await Promise.all(
     order.items.map(async (item) => {
-      // [STOCK] hasStockManagement select e add kora hoyeche
+      // [FIX] simple product er jonno currentStock / lowStockThreshold o select kora hoyeche
       const product = await ProductModel.findById(item.productId).select(
-        "variants hasStockManagement",
+        "variants currentStock lowStockThreshold hasStockManagement",
       );
       // [STOCK] product nei ba stock managed na hole restore korar kichu nei
       if (!product || !isStockManaged(product)) return;
 
-      const unit = locateStockUnit(product, item.variantId);
+      const unit = locateStockUnit(product, cleanVariantId(item.variantId));
       if (!unit) return;
 
       const restored = await restoreStockForLine({
@@ -552,7 +564,7 @@ const buyNow = async (req, res) => {
     const result = await attemptStoreCheckout({
       userId,
       storeId: product.storeId,
-      lines: [{ productId, variantId: variantId || null, quantity }],
+      lines: [{ productId, variantId: cleanVariantId(variantId), quantity }],
       deliveryAddress,
       note,
       paymentMethod,

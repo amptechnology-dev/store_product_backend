@@ -13,6 +13,8 @@ const getStockManagementEnabled = async (storeId) => {
     : DEFAULT_SETTINGS.hasStockManagement;
 };
 
-const isStockManaged = (product) => product?.hasStockManagement !== false;
+// Sudhu explicit `true` hole-i stock managed.
+// false / undefined / null shob OFF -> stock check, decrement, out-of-stock kichu hobe na.
+const isStockManaged = (product) => product?.hasStockManagement === true;
 
 module.exports = { DEFAULT_SETTINGS, getStockManagementEnabled, isStockManaged };

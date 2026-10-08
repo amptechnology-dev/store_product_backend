@@ -1,71 +1,80 @@
+// helper/resolveVariant.js
+
+// "null" / "undefined" / "" string ke empty dhorbe
+const normalizeId = (id) => {
+  if (id === undefined || id === null) return null;
+  const s = String(id).trim();
+  if (!s || s === "null" || s === "undefined") return null;
+  return s;
+};
+
+const orNull = (v) => (v === undefined ? null : v);
+
 const findActiveVariant = (product, variantId) => {
-  if (!variantId || !Array.isArray(product?.variants)) return null;
-  const idStr = String(variantId);
+  const idStr = normalizeId(variantId);
+  if (!idStr || !Array.isArray(product?.variants)) return null;
 
   for (const v of product.variants) {
-    if (String(v._id) === idStr && v.isActive !== false) {
-      return {
-        variant: v,
-        color: v.color ?? null,
-        colorImages: v.images ?? null,
-      };
+    if (v.isActive === false) continue; // inactive color/parent skip
+
+    if (String(v._id) === idStr) {
+      // size variant ache, kintu size select hoy nai
+      if (Array.isArray(v.sizeVariants) && v.sizeVariants.length > 0) {
+        return null;
+      }
+      return { variant: v, parent: null };
     }
 
     if (Array.isArray(v.sizeVariants) && v.sizeVariants.length) {
       const nested = v.sizeVariants.find(
         (sv) => String(sv._id) === idStr && sv.isActive !== false,
       );
-      if (nested && v.isActive !== false) {
-        return {
-          variant: nested,
-          color: v.color ?? null,
-          colorImages: v.images ?? null,
-        };
-      }
+      if (nested) return { variant: nested, parent: v };
     }
   }
 
   return null;
 };
 
-// variantId thakle -> oi variant-er live data (color/size/weight/height/image soho)
-// variantId na thakle -> product simple (no variant) hole product-level data
-// product-e variant thakle kintu variantId na dile -> null (invalid, variant select kora lagbe)
+// NOTE: price na thakleo null return kora hobe NA.
+// Price-less item controller e priceOnRequest hishebe handle hoy.
+// null = sudhu "variant invalid / select kora hoy nai"
 const resolveLineSource = (product, variantId) => {
-  const hasVariants =
-    Array.isArray(product?.variants) && product.variants.length > 0;
+  if (!product) return null;
 
-  if (variantId) {
-    const found = findActiveVariant(product, variantId);
+  const idStr = normalizeId(variantId);
+  const hasVariants =
+    Array.isArray(product.variants) && product.variants.length > 0;
+
+  // ---------- variant selected ----------
+  if (idStr) {
+    const found = findActiveVariant(product, idStr);
     if (!found) return null;
 
-    const { variant, color, colorImages } = found;
+    const { variant, parent } = found;
     return {
       variantId: variant._id,
-      mrp: variant.mrp,
-      offerPrice: variant.offerPrice,
-      stock: variant.currentStock,
-      color: variant.color ?? color ?? null,
+      mrp: orNull(variant.mrp ?? parent?.mrp),
+      offerPrice: orNull(variant.offerPrice ?? parent?.offerPrice),
+      stock: variant.currentStock ?? 0,
+      color: variant.color ?? parent?.color ?? null,
       size: variant.size ?? null,
-      weight: variant.weight ?? null,
-      height: variant.height ?? null,
+      weight: variant.weight ?? parent?.weight ?? null,
+      height: variant.height ?? parent?.height ?? null,
       image:
-        (variant.images && variant.images[0]) ||
-        (colorImages && colorImages[0]) ||
-        product.images?.[0] ||
-        null,
+        variant.images?.[0] || parent?.images?.[0] || product.images?.[0] || null,
     };
   }
 
+  // product e variant ache, kintu variantId nai -> user ke select korte hobe
   if (hasVariants) return null;
 
-  if (product?.mrp === undefined || product?.mrp === null) return null;
-
+  // ---------- simple product (price thakuk ba na thakuk) ----------
   return {
     variantId: null,
-    mrp: product.mrp,
-    offerPrice: product.offerPrice,
-    stock: product.currentStock,
+    mrp: orNull(product.mrp),
+    offerPrice: orNull(product.offerPrice),
+    stock: product.currentStock ?? 0,
     color: null,
     size: null,
     weight: null,

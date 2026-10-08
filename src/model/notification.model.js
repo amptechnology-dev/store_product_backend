@@ -10,6 +10,7 @@ const NOTIFICATION_TYPES = [
   "ORDER_SHIPPED",
   "ORDER_DELIVERED",
   "NEW_OFFER",
+  "PRICE_QUOTED"
 ];
 
 const notificationSchema = new mongoose.Schema(
