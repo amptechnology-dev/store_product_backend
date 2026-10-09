@@ -66,6 +66,9 @@ const MAX_LIMIT = 100;
 
 const DELIVERY_DATE_EDITABLE = ["PENDING", "CONFIRMED", "SHIPPED"];
 
+// [PAYMENT] ONLINE order e payment korar time limit
+const PAYMENT_WINDOW_MS = 30 * 60 * 1000;
+
 const toDeliveryDate = (str) => new Date(`${str}T00:00:00.000Z`);
 
 const getUserId = (req) => req.user?._id || req.user?.id;
@@ -319,6 +322,14 @@ const attemptStoreCheckout = async ({
     ? "AWAITING_QUOTE"
     : "NOT_REQUIRED";
 
+  // [PAYMENT] ONLINE + price already fixed hole 30 min er payment window.
+  // Quote lagbe emon order e window shuru hoy user quote accept korle (respondToQuote),
+  // nahole quote asar age-i order auto-cancel hoye jabe.
+  const paymentExpiresAt =
+    paymentMethod === "ONLINE" && priceStatus === "NOT_REQUIRED"
+      ? new Date(Date.now() + PAYMENT_WINDOW_MS)
+      : null;
+
   // ---------- order create fail korle stock ferot dao ----------
   let order;
   try {
@@ -336,6 +347,8 @@ const attemptStoreCheckout = async ({
       deliveryAddress,
       note,
       paymentMethod,
+      paymentStatus: "PENDING",
+      paymentExpiresAt,
       status: "PENDING",
       statusHistory: [{ status: "PENDING", changedBy: userId, at: new Date() }],
     });
@@ -368,6 +381,7 @@ const attemptStoreCheckout = async ({
 };
 
 // ===================== INTERNAL: restore stock for every item of an order =====================
+// [PAYMENT] payment.controller (expire cron) o eta use kore, tai export kora ache
 const restoreOrderStock = async (order, userId) => {
   await Promise.all(
     order.items.map(async (item) => {
@@ -751,7 +765,7 @@ const cancelMyOrder = async (req, res) => {
     const { reason } = cancelOrderSchema.parse(req.body);
 
     const existing = await OrderModel.findOne({ _id: orderId, userId })
-      .select("status")
+      .select("status paymentStatus")
       .lean();
     if (!existing) {
       return res
@@ -766,10 +780,20 @@ const cancelMyOrder = async (req, res) => {
       });
     }
 
+    // [PAYMENT] online paid order cancel korle refund lagbe, refund flow na thaka porjonto block
+    if (existing.paymentStatus === "PAID") {
+      return res.status(400).json({
+        success: false,
+        message:
+          "Paid order cannot be cancelled online. Contact the store for refund.",
+      });
+    }
+
     // atomic claim: ekta request-i jitbe, tai stock ekbar-i restore hobe
+    // [PAYMENT] filter e paymentStatus: $ne PAID, jeno ei majhe payment complete hole cancel na hoy
     const order = await transitionOrder({
       orderId,
-      filter: { userId },
+      filter: { userId, paymentStatus: { $ne: "PAID" } },
       status: "CANCELLED",
       note: reason,
       userId,
@@ -867,6 +891,10 @@ const respondToQuote = async (req, res) => {
           discount: totals.discount,
           totalAmount: totals.totalAmount,
           priceStatus: "CONFIRMED",
+          // [PAYMENT] ONLINE order e quote accept er por theke 30 min payment window shuru
+          ...(existing.paymentMethod === "ONLINE"
+            ? { paymentExpiresAt: new Date(Date.now() + PAYMENT_WINDOW_MS) }
+            : {}),
         },
         $push: {
           priceHistory: {
@@ -1062,7 +1090,9 @@ const updateOrderStatus = async (req, res) => {
       updateOrderStatusSchema.parse(req.body);
 
     const existing = await OrderModel.findById(orderId)
-      .select("storeId status expectedDeliveryDate priceStatus")
+      .select(
+        "storeId status expectedDeliveryDate priceStatus paymentMethod paymentStatus",
+      )
       .lean();
     if (!existing) {
       return res
@@ -1099,13 +1129,29 @@ const updateOrderStatus = async (req, res) => {
       });
     }
 
+    // [PAYMENT] ONLINE order e payment complete na hole confirm kora jabe na
+    if (
+      status === "CONFIRMED" &&
+      existing.paymentMethod === "ONLINE" &&
+      existing.paymentStatus !== "PAID"
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: "Customer has not completed the online payment yet",
+      });
+    }
+
     const extra = {};
     if (status === "CANCELLED") {
       extra.cancelReason = note || null;
       extra.cancelledBy = "STORE";
     }
     if (status === "DELIVERED") {
-      extra.paymentStatus = "PAID"; // COD: delivery te taka pawa jay
+      // [PAYMENT] COD: delivery te taka pawa jay. ONLINE already paid
+      if (existing.paymentMethod === "COD") {
+        extra.paymentStatus = "PAID";
+        extra.paidAt = new Date();
+      }
     }
     if (status === "SHIPPED") {
       // shipped korar age delivery date lagbe (notun pathale seta, nahole age thekei thakte hobe)
@@ -1126,13 +1172,20 @@ const updateOrderStatus = async (req, res) => {
       }
     }
 
+    // transition er atomic filter
+    let filter = {};
+    if (status === "CONFIRMED") {
+      // [QUOTE] race guard: ei majhe user quote reject korle confirm hobe na
+      filter = { priceStatus: { $nin: QUOTE_PENDING_STATUSES } };
+      // [PAYMENT] ONLINE hole PAID thakte hobe (COD er jonno kono restriction nei)
+      if (existing.paymentMethod === "ONLINE") {
+        filter.paymentStatus = "PAID";
+      }
+    }
+
     const order = await transitionOrder({
       orderId,
-      // [QUOTE] race guard: ei majhe user quote reject korle confirm hobe na
-      filter:
-        status === "CONFIRMED"
-          ? { priceStatus: { $nin: QUOTE_PENDING_STATUSES } }
-          : {},
+      filter,
       status,
       note,
       userId,
@@ -1374,4 +1427,5 @@ module.exports = {
   updateOrderStatus,
   updateDeliveryDate,
   submitQuote,
+  restoreOrderStock, 
 };

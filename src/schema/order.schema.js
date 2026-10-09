@@ -12,6 +12,9 @@ const ORDER_STATUSES = [
   "CANCELLED",
 ];
 
+// [PAYMENT] COD ar PayU online
+const PAYMENT_METHODS = ["COD", "ONLINE"];
+
 const deliveryAddressInputSchema = z.object({
   fullName: z.string().trim().min(1, "Full name is required"),
   phone: z.string().trim().min(10, "Valid phone number is required"),
@@ -29,7 +32,7 @@ const cartCheckoutSchema = z.object({
   storeIds: z.array(objectIdSchema).optional(),
   deliveryAddress: deliveryAddressInputSchema,
   note: z.string().trim().optional(),
-  paymentMethod: z.enum(["COD"]).default("COD"),
+  paymentMethod: z.enum(PAYMENT_METHODS).default("COD"),
 });
 
 // ---- Product theke direct "Buy Now" (cart chara, ekta product + optional variant) ----
@@ -43,7 +46,7 @@ const directCheckoutSchema = z.object({
     .default(1),
   deliveryAddress: deliveryAddressInputSchema,
   note: z.string().trim().optional(),
-  paymentMethod: z.enum(["COD"]).default("COD"),
+  paymentMethod: z.enum(PAYMENT_METHODS).default("COD"),
 });
 
 const cancelOrderSchema = z.object({
@@ -98,8 +101,15 @@ const respondQuoteSchema = z.object({
   reason: z.string().trim().max(300).optional(),
 });
 
+// ---- [PAYMENT] PayU payment initiate ----
+// body puro optional, Postman e {} pathalei cholbe
+const initiatePaymentSchema = z.object({
+  returnUrl: z.string().url().optional(),
+});
+
 module.exports = {
   ORDER_STATUSES,
+  PAYMENT_METHODS,
   cartCheckoutSchema,
   directCheckoutSchema,
   cancelOrderSchema,
@@ -107,4 +117,5 @@ module.exports = {
   updateDeliveryDateSchema,
   submitQuoteSchema,
   respondQuoteSchema,
+  initiatePaymentSchema,
 };

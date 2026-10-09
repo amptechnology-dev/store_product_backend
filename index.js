@@ -4,6 +4,7 @@ const path = require("path");
 const cors = require("cors");
 const Conect = require("./src/db/Connent.js");
 const cookieParser = require("cookie-parser");
+const { expireUnpaidOrders } = require("./src/controller/payment.controller.js");
 
 dotenv.config();
 
@@ -69,6 +70,7 @@ const companyRoutes = require("./src/routes/company.routes.js");
 const storeVisitRoutes = require("./src/routes/storeVisit.route.js")
 const appReleaseRoutes = require("./src/routes/appRelease.route.js");
 const installRoutes = require("./src/routes/install.routes.js");
+const paymentRoutes = require("./src/routes/payment.routes.js");
 
 app.use("/api/register", registerRoutes);
 app.use("/api/login", loginRoutes);
@@ -93,6 +95,11 @@ app.use("/api/company", companyRoutes);
 app.use("/api/store-visit",storeVisitRoutes)
 app.use("/api/app-release", appReleaseRoutes);
 app.use("/api/install", installRoutes);
+app.use("/api/payment", paymentRoutes);
+
+setInterval(() => {
+  expireUnpaidOrders().catch((e) => console.error("Expire orders error:", e));
+}, 5 * 60 * 1000);
 
 const port = process.env.PORT || 8090;
 

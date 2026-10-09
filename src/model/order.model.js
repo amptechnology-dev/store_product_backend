@@ -9,6 +9,9 @@ const ORDER_STATUSES = [
   "CANCELLED",
 ];
 
+const PAYMENT_METHODS = ["COD", "ONLINE"];
+const PAYMENT_STATUSES = ["PENDING", "INITIATED", "PAID", "FAILED", "REFUNDED"];
+
 const orderItemSchema = new mongoose.Schema({
   productId: {
     type: mongoose.Schema.Types.ObjectId,
@@ -95,6 +98,26 @@ const priceHistorySchema = new mongoose.Schema(
   { _id: false },
 );
 
+// PayU payment attempt history (ekta order e multiple retry hote pare)
+const paymentAttemptSchema = new mongoose.Schema(
+  {
+    txnid: { type: String, required: true },
+    amount: { type: Number, required: true },
+    status: {
+      type: String,
+      enum: ["INITIATED", "SUCCESS", "FAILED"],
+      default: "INITIATED",
+    },
+    mihpayid: { type: String, default: null }, // PayU payment id
+    mode: { type: String, default: null }, // UPI / CC / NB
+    bankRefNum: { type: String, default: null },
+    errorMessage: { type: String, default: null },
+    createdAt: { type: Date, default: Date.now },
+    completedAt: { type: Date, default: null },
+  },
+  { _id: false },
+);
+
 const orderSchema = new mongoose.Schema(
   {
     orderNumber: { type: String, unique: true },
@@ -134,12 +157,17 @@ const orderSchema = new mongoose.Schema(
     note: { type: String, default: null },
     expectedDeliveryDate: { type: Date, default: null },
 
-    paymentMethod: { type: String, enum: ["COD"], default: "COD" },
+    // ---------- payment ----------
+    paymentMethod: { type: String, enum: PAYMENT_METHODS, default: "COD" },
     paymentStatus: {
       type: String,
-      enum: ["PENDING", "PAID"],
+      enum: PAYMENT_STATUSES,
       default: "PENDING",
     },
+    paymentAttempts: { type: [paymentAttemptSchema], default: [] },
+    paidAt: { type: Date, default: null },
+    // ONLINE unpaid order auto-cancel er jonno
+    paymentExpiresAt: { type: Date, default: null },
 
     status: { type: String, enum: ORDER_STATUSES, default: "PENDING" },
     statusHistory: [statusHistorySchema],
@@ -164,6 +192,10 @@ orderSchema.index({ userId: 1, storeId: 1, createdAt: -1 });
 orderSchema.index({ storeId: 1, status: 1, createdAt: -1 });
 orderSchema.index({ storeId: 1, priceStatus: 1, createdAt: -1 });
 orderSchema.index({ checkoutId: 1 });
+// payment lookup (callback e txnid diye order khuje pawa)
+orderSchema.index({ "paymentAttempts.txnid": 1 });
+// expire cron query
+orderSchema.index({ paymentStatus: 1, paymentExpiresAt: 1 });
 
 orderSchema.pre("save", async function () {
   if (this.isNew && !this.orderNumber) {
