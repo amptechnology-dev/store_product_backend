@@ -41,6 +41,7 @@ const {
   findOfferWithoutMrp,
   isPriceOnRequestProduct,
 } = require("../helper/priceQuote.js");
+const { getDeliverySummary } = require("../helper/deliveryEstimate.js");
 
 const escapeRegex = (str = "") => str.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
@@ -1178,6 +1179,12 @@ const fetchStoreProducts = async (store, query, categoryId) => {
   const totalProducts = result?.totalCount?.[0]?.count || 0;
   const totalPages = Math.ceil(totalProducts / limit);
 
+  // [DELIVERY] delivery store-wise, tai ekbar-i hishab
+  const delivery = await getDeliverySummary({
+    storeId: store._id,
+    pincode: query.pincode,
+  });
+
   return {
     page,
     limit,
@@ -1185,7 +1192,8 @@ const fetchStoreProducts = async (store, query, categoryId) => {
     totalProducts,
     hasNextPage: page < totalPages,
     hasPrevPage: page > 1,
-    products: products.map(formatProduct),
+    delivery,
+    products: products.map((p) => ({ ...formatProduct(p), delivery })),
   };
 };
 
@@ -1337,6 +1345,11 @@ const getStoreProducts = async (req, res) => {
       });
     }
 
+    const delivery = await getDeliverySummary({
+      storeId: store._id,
+      pincode: req.query.pincode,
+    });
+
     products = products.map((p) => {
       const prices = getOfferPrices(p);
       const minOfferPrice = prices.length ? Math.min(...prices) : null;
@@ -1352,6 +1365,7 @@ const getStoreProducts = async (req, res) => {
         minOfferPrice,
         reviews,
         maxReview,
+        delivery,
       };
     });
 
@@ -1374,6 +1388,7 @@ const getStoreProducts = async (req, res) => {
       success: true,
       store,
       count: products.length,
+      delivery,
       products,
     });
   } catch (error) {
@@ -1467,18 +1482,24 @@ const getStoreSingleProduct = async (req, res) => {
           .lean()
       : [];
 
-    // [TIER] related product e o hasTierPricing / minTierPrice jabe
-    const relatedProducts = relatedRaw.map((p) =>
-      formatProduct({
+    const delivery = await getDeliverySummary({
+      storeId: store._id,
+      pincode: req.query.pincode,
+    });
+
+    const relatedProducts = relatedRaw.map((p) => ({
+      ...formatProduct({
         ...p,
         categoryId: categoryId ? { _id: categoryId } : null,
       }),
-    );
+      delivery,
+    }));
 
     return res.status(200).json({
       success: true,
       store,
-      product: formatProduct(product),
+      delivery,
+      product: { ...formatProduct(product), delivery },
       relatedProducts,
     });
   } catch (error) {

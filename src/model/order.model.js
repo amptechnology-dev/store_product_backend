@@ -98,6 +98,18 @@ const priceHistorySchema = new mongoose.Schema(
   { _id: false },
 );
 
+const deliveryInfoSchema = new mongoose.Schema(
+  {
+    mode: { type: String, enum: ["LOCAL", "NATIONAL"] },
+    distanceKm: { type: Number, default: null },
+    minDays: { type: Number },
+    maxDays: { type: Number },
+    estimatedMinDate: { type: Date },
+    estimatedMaxDate: { type: Date },
+  },
+  { _id: false },
+);
+
 // PayU payment attempt history (ekta order e multiple retry hote pare)
 const paymentAttemptSchema = new mongoose.Schema(
   {
@@ -156,6 +168,7 @@ const orderSchema = new mongoose.Schema(
     deliveryAddress: { type: deliveryAddressSchema, required: true },
     note: { type: String, default: null },
     expectedDeliveryDate: { type: Date, default: null },
+    deliveryInfo: { type: deliveryInfoSchema, default: null },
 
     // ---------- payment ----------
     paymentMethod: { type: String, enum: PAYMENT_METHODS, default: "COD" },

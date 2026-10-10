@@ -42,6 +42,7 @@ const {
   computeTotals,
   QUOTE_PENDING_STATUSES,
 } = require("../helper/priceQuote.js");
+const { checkStoreDelivery } = require("../helper/deliveryEstimate.js");
 
 // ===================== CONSTANTS / HELPERS =====================
 const ORDER_STATUSES = [
@@ -198,6 +199,19 @@ const attemptStoreCheckout = async ({
   });
   const productMap = new Map(products.map((p) => [String(p._id), p]));
 
+  const delivery = await checkStoreDelivery({
+    storeId,
+    pincode: deliveryAddress?.pincode,
+  });
+  if (!delivery.deliverable) {
+    return {
+      success: false,
+      storeId,
+      message:
+        delivery.message || "This store does not deliver to your pincode",
+    };
+  }
+
   const orderItems = [];
   const decrementedLines = [];
   const outOfStockLines = [];
@@ -302,7 +316,11 @@ const attemptStoreCheckout = async ({
       weight: source.weight,
       height: source.height,
       priceOnRequest,
-      mrp: hasPrice(source.mrp) ? source.mrp : priceOnRequest ? null : unitPrice,
+      mrp: hasPrice(source.mrp)
+        ? source.mrp
+        : priceOnRequest
+          ? null
+          : unitPrice,
       offerPrice: priceOnRequest ? null : unitPrice, // [TIER]
       quantity: line.quantity,
       lineTotal: priceOnRequest ? null : round2(unitPrice * line.quantity), // [TIER]
@@ -345,6 +363,7 @@ const attemptStoreCheckout = async ({
       totalAmount,
       priceStatus,
       deliveryAddress,
+      deliveryInfo: delivery.info,
       note,
       paymentMethod,
       paymentStatus: "PENDING",
@@ -1427,5 +1446,5 @@ module.exports = {
   updateOrderStatus,
   updateDeliveryDate,
   submitQuote,
-  restoreOrderStock, 
+  restoreOrderStock,
 };
