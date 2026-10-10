@@ -12,6 +12,15 @@ const ORDER_STATUSES = [
 const PAYMENT_METHODS = ["COD", "ONLINE"];
 const PAYMENT_STATUSES = ["PENDING", "INITIATED", "PAID", "FAILED", "REFUNDED"];
 
+const gstRatesSchema = new mongoose.Schema(
+  {
+    cgst: { type: Number, default: null },
+    sgst: { type: Number, default: null },
+    igst: { type: Number, default: null },
+  },
+  { _id: false },
+);
+
 const orderItemSchema = new mongoose.Schema({
   productId: {
     type: mongoose.Schema.Types.ObjectId,
@@ -36,6 +45,14 @@ const orderItemSchema = new mongoose.Schema({
   quantity: { type: Number, required: true, min: 1 },
   lineTotal: { type: Number, default: null, min: 0 },
   priceOnRequest: { type: Boolean, default: false },
+  gstRates: { type: gstRatesSchema, default: null }, // product e configured rate
+  gstInclusive: { type: Boolean, default: false },
+  taxableAmount: { type: Number, default: null },
+  cgstAmount: { type: Number, default: 0 },
+  sgstAmount: { type: Number, default: 0 },
+  igstAmount: { type: Number, default: 0 },
+  gstAmount: { type: Number, default: 0 },
+  lineTotalWithGst: { type: Number, default: null },
 });
 
 const deliveryAddressSchema = new mongoose.Schema(
@@ -163,6 +180,13 @@ const orderSchema = new mongoose.Schema(
     totalItems: { type: Number, required: true, min: 1 },
     totalMrp: { type: Number, required: true, min: 0 },
     discount: { type: Number, required: true, min: 0 },
+     gstMode: { type: String, enum: ["INTRA", "INTER"], default: "INTRA" },
+    subtotal: { type: Number, default: 0, min: 0 }, // GST er age item total
+    totalTaxable: { type: Number, default: 0, min: 0 },
+    totalCgst: { type: Number, default: 0, min: 0 },
+    totalSgst: { type: Number, default: 0, min: 0 },
+    totalIgst: { type: Number, default: 0, min: 0 },
+    totalGst: { type: Number, default: 0, min: 0 },
     totalAmount: { type: Number, required: true, min: 0 },
 
     deliveryAddress: { type: deliveryAddressSchema, required: true },

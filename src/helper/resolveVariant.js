@@ -1,4 +1,5 @@
 // helper/resolveVariant.js
+const { pickGst } = require("./gst.js");
 
 // "null" / "undefined" / "" string ke empty dhorbe
 const normalizeId = (id) => {
@@ -63,6 +64,9 @@ const resolveLineSource = (product, variantId) => {
       height: variant.height ?? parent?.height ?? null,
       image:
         variant.images?.[0] || parent?.images?.[0] || product.images?.[0] || null,
+      // [GST] size -> color -> product
+      gst: pickGst(variant.gst, parent?.gst, product.gst),
+      gstInclusive: product.gstInclusive === true,
     };
   }
 
@@ -80,6 +84,8 @@ const resolveLineSource = (product, variantId) => {
     weight: null,
     height: null,
     image: product.images?.[0] ?? null,
+    gst: pickGst(product.gst),
+    gstInclusive: product.gstInclusive === true,
   };
 };
 

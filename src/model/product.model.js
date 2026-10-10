@@ -12,6 +12,15 @@ const packagingDetailsSchema = new mongoose.Schema(
   { _id: false },
 );
 
+const gstSchema = new mongoose.Schema(
+  {
+    cgst: { type: Number, min: 0, max: 100, default: null },
+    sgst: { type: Number, min: 0, max: 100, default: null },
+    igst: { type: Number, min: 0, max: 100, default: null },
+  },
+  { _id: false },
+);
+
 // quantity based price: minQty..maxQty er jonno per-unit price
 const priceTierSchema = new mongoose.Schema(
   {
@@ -55,6 +64,7 @@ const sizeVariantSchema = new mongoose.Schema(
     sku: { type: String, trim: true },
     isActive: { type: Boolean, default: true },
     packagingDetails: packagingDetailsSchema,
+    gst: { type: gstSchema, default: undefined },
     priceTiers: { type: [priceTierSchema], default: [] },
   },
   { timestamps: false },
@@ -87,6 +97,7 @@ const variantSchema = new mongoose.Schema(
     sku: { type: String, trim: true },
     isActive: { type: Boolean, default: true },
     packagingDetails: packagingDetailsSchema,
+    gst: { type: gstSchema, default: undefined },
     priceTiers: { type: [priceTierSchema], default: [] },
 
     sizeVariants: { type: [sizeVariantSchema], default: [] },
@@ -139,16 +150,15 @@ const productSchema = new mongoose.Schema(
     lowStockThreshold: { type: Number, default: 0, min: 0 },
     hasLowStock: { type: Boolean, default: false, index: true },
     packagingDetails: packagingDetailsSchema,
+    gst: { type: gstSchema, default: undefined },
     priceTiers: { type: [priceTierSchema], default: [] },
 
     variants: { type: [variantSchema], default: [] },
 
     hasVariants: { type: Boolean, default: false },
     hasColor: { type: Boolean, default: false },
-    // [STOCK] product create er somoy store setting theke snapshot hoy.
-    // default true: purono product (jader e field nei) age moto stock managed thakbe
     hasStockManagement: { type: Boolean, default: true },
-
+    gstInclusive: { type: Boolean, default: false },
     isActive: { type: Boolean, default: true },
     isVerified: { type: Boolean, default: false },
     storeId: {

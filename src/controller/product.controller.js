@@ -42,6 +42,8 @@ const {
   isPriceOnRequestProduct,
 } = require("../helper/priceQuote.js");
 const { getDeliverySummary } = require("../helper/deliveryEstimate.js");
+// [GST]
+const { applyGst, withEffectiveGst } = require("../helper/gst.js");
 
 const escapeRegex = (str = "") => str.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
@@ -141,6 +143,16 @@ const parseJsonField = (body, key) => {
   return null;
 };
 
+// [GST] FormData te gst JSON string hoye ashe. Zod parse er age object banate hobe,
+// nahole zod object schema string e fail korbe. Khali string hole key-ta-i bad.
+const parseGstField = (body) => {
+  if (body.gst === "") {
+    delete body.gst;
+    return null;
+  }
+  return parseJsonField(body, "gst");
+};
+
 // [TIER] raw tier list -> clean numbers (minQty chain: first = 1, next = prev.maxQty + 1)
 const normalizeTierList = (tiers) => {
   if (!Array.isArray(tiers)) return [];
@@ -220,6 +232,11 @@ const createProduct = async (req, res) => {
     if (tierParseError) {
       return res.status(400).json({ success: false, message: tierParseError });
     }
+    // [GST] zod parse er age gst string -> object
+    const gstParseError = parseGstField(body);
+    if (gstParseError) {
+      return res.status(400).json({ success: false, message: gstParseError });
+    }
 
     const parsedData = createProductSchema.parse(body);
 
@@ -298,6 +315,16 @@ const createProduct = async (req, res) => {
     // [TIER] tier gulo shobshomoy data te thakbe
     syncTiers(data, body, hasVariants);
 
+    // [GST] product / color / size level GST + gstInclusive validate + attach
+    const gstError = applyGst(body, data, hasVariants);
+    if (gstError) {
+      return res.status(400).json({
+        success: false,
+        message: gstError,
+        errors: [{ field: "gst", message: gstError }],
+      });
+    }
+
     // [STOCK] store settings e stock management on ache kina (product e snapshot hishebe save hobe)
     const stockEnabled = await getStockManagementEnabled(parsedData.storeId);
 
@@ -324,7 +351,7 @@ const createProduct = async (req, res) => {
       isVerified: true,
       hasVariants,
       hasColor,
-      ...data,
+      ...data, // [GST] data.gst + data.gstInclusive eikhane diye jay
       // [STOCK] data er por rakhlam jate validateProduct er kono value eta override na kore
       hasStockManagement: stockEnabled,
     });
@@ -457,6 +484,9 @@ const getAllProducts = async (req, res) => {
           priceTiers: 1,
           mrp: 1,
           offerPrice: 1,
+          // [GST] list page er badge / quick view er jonno (variants er bhetore nested gst ashe)
+          gst: 1,
+          gstInclusive: 1,
           stock: 1,
           hasVariants: 1,
           hasColor: 1,
@@ -509,7 +539,7 @@ const getAllProducts = async (req, res) => {
       limit,
       totalPages,
       totalProducts,
-      products,
+      products: products.map(withEffectiveGst), // [GST]
     });
   } catch (error) {
     console.error("Error fetching products:", error);
@@ -588,6 +618,11 @@ const updateProduct = async (req, res) => {
     if (tierParseError) {
       return res.status(400).json({ success: false, message: tierParseError });
     }
+    // [GST] zod parse er age gst string -> object
+    const gstParseError = parseGstField(body);
+    if (gstParseError) {
+      return res.status(400).json({ success: false, message: gstParseError });
+    }
 
     const parsedData = updateProductSchema.parse(body);
 
@@ -641,6 +676,10 @@ const updateProduct = async (req, res) => {
 
     let updateData = { ...parsedData, images: finalMainImages };
 
+    // [GST] product-level GST khali kore dile purono GST muchte $unset lagbe
+    // ($set e undefined dile mongoose seta bad dey, tai purono value theke jay)
+    const unsetFields = {};
+
     // variants/pricing/stock/tier somporkito kono field ashle notun kore structure decide hobe
     const isStructuralUpdate =
       body.variants !== undefined ||
@@ -671,6 +710,16 @@ const updateProduct = async (req, res) => {
       }
       // [TIER] tier gulo shobshomoy data te thakbe (empty hole purono tier muche jabe)
       syncTiers(data, body, hasVariants);
+
+      // [GST] product / color / size level GST + gstInclusive validate + attach
+      const gstError = applyGst(body, data, hasVariants);
+      if (gstError) {
+        return res.status(400).json({
+          success: false,
+          message: gstError,
+          errors: [{ field: "gst", message: gstError }],
+        });
+      }
 
       if (hasColor) {
         const colorImageMap = await uploadVariantImages(req.files);
@@ -752,6 +801,12 @@ const updateProduct = async (req, res) => {
         hasColor,
       };
 
+      // [GST] product-level gst khali hole $set theke bad diye $unset koro
+      if (!data.gst) {
+        delete updateData.gst;
+        unsetFields.gst = "";
+      }
+
       // [STOCK] low stock flag shudhu stock managed product er jonno
       if (stockManaged) {
         const tempForFlagCheck = {
@@ -781,7 +836,11 @@ const updateProduct = async (req, res) => {
 
     const updatedProduct = await ProductModel.findByIdAndUpdate(
       id,
-      { $set: updateData },
+      {
+        $set: updateData,
+        // [GST]
+        ...(Object.keys(unsetFields).length ? { $unset: unsetFields } : {}),
+      },
       { new: true, runValidators: true },
     );
 
@@ -901,9 +960,11 @@ const getSingleProduct = async (req, res) => {
       return sendStoreUnavailable(res);
     }
 
-    return res
-      .status(200)
-      .json({ message: "Product get successfully", product });
+    // [GST] gst (normalized) + gstInclusive + variant/size e effectiveGst
+    return res.status(200).json({
+      message: "Product get successfully",
+      product: withEffectiveGst(product),
+    });
   } catch (error) {
     console.error("Get Single Product Error:", error);
     return res.status(500).json({ message: "Internal server error" });
@@ -989,6 +1050,8 @@ const allProductWithStore = async (req, res) => {
           unit: 1,
           variants: 1,
           priceTiers: 1,
+          gst: 1, // [GST]
+          gstInclusive: 1, // [GST]
           minOfferPrice: 1,
           maxOfferPrice: 1,
           deliveryTime: 1,
@@ -1039,8 +1102,9 @@ const PUBLIC_STORE_FIELDS =
   "storeName storeType storeUniqueId images address lat long contactNo whatsappNo supportNo email description timingByDay isFeatured";
 
 // [QUOTE] mrp offerPrice add kora hoyeche (simple product ke vul kore "price on request" na dhorar jonno)
+// [GST] gst gstInclusive add (variants er bhetore nested gst automatic ashe)
 const PRODUCT_LIST_FIELDS =
-  "name productCode images description unit mrp offerPrice variants priceTiers deliveryTime storeId categoryId createdAt";
+  "name productCode images description unit mrp offerPrice variants priceTiers gst gstInclusive deliveryTime storeId categoryId createdAt";
 
 const SORT_MAP = {
   newest: { createdAt: -1 },
@@ -1068,8 +1132,11 @@ const getPublicStore = (storeUniqueId) =>
 
 // [TIER] hasTierPricing + minTierPrice jog kora hoyeche (user app er jonno)
 // [QUOTE] priceOnRequest flag
+// [GST] withEffectiveGst: gst (normalized), gstInclusive, variant/size e effectiveGst.
+// Eikhane rakhar karone getStoreProducts, getStoreProductsByCategory, getStoreSingleProduct
+// (related products shoho) shob jaygay automatic GST info jabe.
 const formatProduct = ({ categoryId, ...product }) => ({
-  ...product,
+  ...withEffectiveGst(product),
   categoryId: categoryId?._id ?? null,
   category: categoryId?._id
     ? { _id: categoryId._id, name: categoryId.name }
@@ -1157,6 +1224,8 @@ const fetchStoreProducts = async (store, query, categoryId) => {
               priceTiers: 1,
               mrp: 1,
               offerPrice: 1,
+              gst: 1, // [GST]
+              gstInclusive: 1, // [GST]
               stock: 1,
               hasVariants: 1,
               hasColor: 1,
@@ -1301,6 +1370,7 @@ const getStoreProducts = async (req, res) => {
       match.$or = [{ name: regex }, { productCode: regex }];
     }
 
+    // [GST] PRODUCT_LIST_FIELDS e already gst gstInclusive ache
     let products = await ProductModel.find(match)
       .select(
         `${PRODUCT_LIST_FIELDS} stock hasVariants hasColor hasStockManagement reviews averageRating totalReviews`,
@@ -1361,7 +1431,7 @@ const getStoreProducts = async (req, res) => {
           : null;
 
       return {
-        ...formatProduct(p),
+        ...formatProduct(p), // [GST] formatProduct er bhetor theke GST ashe
         minOfferPrice,
         reviews,
         maxReview,
@@ -1451,6 +1521,7 @@ const getStoreSingleProduct = async (req, res) => {
     const store = await getPublicStore(storeUniqueId);
     if (!store) return sendStoreUnavailable(res);
 
+    // [GST] "-userId -__v" exclude kore, tai gst gstInclusive automatic ashe
     const product = await ProductModel.findOne({
       _id: productId,
       storeId: store._id,

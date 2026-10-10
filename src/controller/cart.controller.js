@@ -22,12 +22,20 @@ const {
 const { AVAILABLE_STORE_FILTER } = require("../helper/storeAvailability.js");
 // [QUOTE] price on request
 const { hasPrice } = require("../helper/priceQuote.js");
+// [GST]
+const { getGstMode, calcLineGst } = require("../helper/gst.js");
 
 // ===================== HELPERS =====================
 
 const getUserId = (req) => req.user?._id || req.user?.id;
 
 const round2 = (n) => Math.round((n + Number.EPSILON) * 100) / 100;
+
+// [GST] ?state=West Bengal (user er selected delivery address er state)
+const getDeliveryState = (req) =>
+  typeof req.query?.state === "string" && req.query.state.trim()
+    ? req.query.state.trim()
+    : null;
 
 const handleError = (res, error, label) => {
   if (error.name === "ZodError") {
@@ -79,22 +87,36 @@ const newSummary = () => ({
   totalItems: 0,
   totalMrp: 0,
   discount: 0,
-  totalAmount: 0,
+  subtotal: 0, // GST er age
+  totalCgst: 0,
+  totalSgst: 0,
+  totalIgst: 0,
+  totalGst: 0,
+  totalAmount: 0, // payable (GST soho)
   hasUnavailableItems: false,
   hasPriceOnRequestItems: false,
 });
 
 const finalizeSummary = (s) => {
   s.totalMrp = round2(s.totalMrp);
+  s.subtotal = round2(s.subtotal);
+  s.totalCgst = round2(s.totalCgst);
+  s.totalSgst = round2(s.totalSgst);
+  s.totalIgst = round2(s.totalIgst);
+  s.totalGst = round2(s.totalCgst + s.totalSgst + s.totalIgst);
   s.totalAmount = round2(s.totalAmount);
-  s.discount = round2(Math.max(0, s.totalMrp - s.totalAmount));
+  s.discount = round2(Math.max(0, s.totalMrp - s.subtotal));
   return s;
 };
 
 // cart ke store wise group kore live product+variant data shoho response banay.
 // inactive / unverified store er item default e hide hoy
 // (hideUnavailableStores = false dile dekhabe, unavailable flag shoho)
-const serializeCart = async (cart, { hideUnavailableStores = true } = {}) => {
+// [GST] deliveryState na dile CGST+SGST dhore estimate dekhay (gstEstimated: true)
+const serializeCart = async (
+  cart,
+  { hideUnavailableStores = true, deliveryState = null } = {},
+) => {
   if (!cart || cart.items.length === 0) {
     return {
       _id: cart?._id ?? null,
@@ -110,12 +132,13 @@ const serializeCart = async (cart, { hideUnavailableStores = true } = {}) => {
     ProductModel.find({ _id: { $in: productIds } })
       // [STOCK] hasStockManagement select e add kora hoyeche (lean e na thakle flag ashto na)
       // [TIER] priceTiers select e add
+      // [GST] gst + gstInclusive (variants er bhetore nested gst automatic ashe)
       .select(
-        "name productCode images unit variants priceTiers mrp offerPrice currentStock hasStockManagement isActive isVerified",
+        "name productCode images unit variants priceTiers mrp offerPrice currentStock hasStockManagement isActive isVerified gst gstInclusive",
       )
       .lean(),
     StoreModel.find({ _id: { $in: storeIds } })
-      .select("storeName storeUniqueId images isActive isVerify")
+      .select("storeName storeUniqueId images isActive isVerify state")
       .lean(),
   ]);
 
@@ -133,6 +156,9 @@ const serializeCart = async (cart, { hideUnavailableStores = true } = {}) => {
     // store inactive / unverified / delete hoye gele cart list e dekhabe na
     if (hideUnavailableStores && !storeAvailable) continue;
 
+    // [GST] store state vs delivery state
+    const gstMode = getGstMode(store?.state, deliveryState);
+
     if (!groups.has(storeKey)) {
       groups.set(storeKey, {
         store: {
@@ -142,6 +168,8 @@ const serializeCart = async (cart, { hideUnavailableStores = true } = {}) => {
           image: store?.images?.[0] ?? null,
           isActive: storeAvailable,
         },
+        gstMode,
+        gstEstimated: !deliveryState,
         items: [],
         summary: newSummary(),
       });
@@ -183,6 +211,19 @@ const serializeCart = async (cart, { hideUnavailableStores = true } = {}) => {
       ? null
       : round2(offerPrice * cappedQuantity);
 
+    // [GST] live product er GST diye line GST (unavailable / price-on-request item e GST nai)
+    const gstRates = isAvailable ? liveSource.gst : null;
+    const gstInclusive = isAvailable && liveSource.gstInclusive === true;
+    const g =
+      isAvailable && !priceOnRequest
+        ? calcLineGst({
+            lineTotal,
+            gst: gstRates,
+            inclusive: gstInclusive,
+            mode: gstMode,
+          })
+        : calcLineGst({ lineTotal: null });
+
     for (const s of [group.summary, overall]) {
       if (isAvailable) {
         s.totalItems += cappedQuantity;
@@ -190,7 +231,11 @@ const serializeCart = async (cart, { hideUnavailableStores = true } = {}) => {
           s.hasPriceOnRequestItems = true;
         } else {
           s.totalMrp += (hasPrice(mrp) ? mrp : offerPrice) * cappedQuantity;
-          s.totalAmount += lineTotal;
+          s.subtotal += lineTotal;
+          s.totalCgst += g.cgstAmount;
+          s.totalSgst += g.sgstAmount;
+          s.totalIgst += g.igstAmount;
+          s.totalAmount += g.lineTotalWithGst;
         }
       } else {
         s.hasUnavailableItems = true;
@@ -212,8 +257,17 @@ const serializeCart = async (cart, { hideUnavailableStores = true } = {}) => {
       quantity: item.quantity,
       mrp: hasPrice(mrp) ? mrp : null,
       offerPrice: priceOnRequest ? null : offerPrice,
-      lineTotal,
+      lineTotal, // GST er age (inclusive hole GST soho)
       priceOnRequest,
+      // [GST]
+      gstRates, // {cgst, sgst, igst} configured %
+      gstInclusive,
+      taxableAmount: g.taxableAmount,
+      cgstAmount: g.cgstAmount,
+      sgstAmount: g.sgstAmount,
+      igstAmount: g.igstAmount,
+      gstAmount: g.gstAmount,
+      lineTotalWithGst: g.lineTotalWithGst,
       isAvailable,
       priceChanged: isAvailable && offerPrice !== item.offerPrice,
       // [TIER] user app e tier list + "aro X ta nile Y price" hint
@@ -354,7 +408,7 @@ const addToCart = async (req, res) => {
     return res.status(200).json({
       success: true,
       message: "Added to cart",
-      cart: await serializeCart(cart),
+      cart: await serializeCart(cart, { deliveryState: getDeliveryState(req) }),
     });
   } catch (error) {
     return handleError(res, error, "Add To Cart Error");
@@ -362,12 +416,14 @@ const addToCart = async (req, res) => {
 };
 
 // ===================== 2. GET CART (store wise) =====================
+// GET /api/cart?state=West Bengal
 const getCart = async (req, res) => {
   try {
     const cart = await CartModel.findOne({ userId: getUserId(req) });
-    return res
-      .status(200)
-      .json({ success: true, cart: await serializeCart(cart) });
+    return res.status(200).json({
+      success: true,
+      cart: await serializeCart(cart, { deliveryState: getDeliveryState(req) }),
+    });
   } catch (error) {
     return handleError(res, error, "Get Cart Error");
   }
@@ -429,7 +485,7 @@ const updateCartItem = async (req, res) => {
     return res.status(200).json({
       success: true,
       message: "Cart updated",
-      cart: await serializeCart(cart),
+      cart: await serializeCart(cart, { deliveryState: getDeliveryState(req) }),
     });
   } catch (error) {
     return handleError(res, error, "Update Cart Item Error");
@@ -456,7 +512,7 @@ const removeCartItem = async (req, res) => {
     return res.status(200).json({
       success: true,
       message: "Item removed from cart",
-      cart: await serializeCart(cart),
+      cart: await serializeCart(cart, { deliveryState: getDeliveryState(req) }),
     });
   } catch (error) {
     return handleError(res, error, "Remove Cart Item Error");
@@ -483,7 +539,7 @@ const removeStoreItems = async (req, res) => {
     return res.status(200).json({
       success: true,
       message: "Store items removed from cart",
-      cart: await serializeCart(cart),
+      cart: await serializeCart(cart, { deliveryState: getDeliveryState(req) }),
     });
   } catch (error) {
     return handleError(res, error, "Remove Store Items Error");

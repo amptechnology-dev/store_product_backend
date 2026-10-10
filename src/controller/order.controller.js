@@ -43,6 +43,8 @@ const {
   QUOTE_PENDING_STATUSES,
 } = require("../helper/priceQuote.js");
 const { checkStoreDelivery } = require("../helper/deliveryEstimate.js");
+// [GST]
+const { getGstMode, applyGstToItem } = require("../helper/gst.js");
 
 // ===================== CONSTANTS / HELPERS =====================
 const ORDER_STATUSES = [
@@ -181,7 +183,7 @@ const attemptStoreCheckout = async ({
     _id: storeId,
     ...AVAILABLE_STORE_FILTER,
   })
-    .select("storeName storeUniqueId")
+    .select("storeName storeUniqueId state") // [GST] state
     .lean();
   if (!store) {
     return {
@@ -211,6 +213,9 @@ const attemptStoreCheckout = async ({
         delivery.message || "This store does not deliver to your pincode",
     };
   }
+
+  // [GST] store state != delivery state hole IGST, nahole CGST+SGST
+  const gstMode = getGstMode(store.state, deliveryAddress?.state);
 
   const orderItems = [];
   const decrementedLines = [];
@@ -316,6 +321,9 @@ const attemptStoreCheckout = async ({
       weight: source.weight,
       height: source.height,
       priceOnRequest,
+      // [GST] size -> color -> product
+      gstRates: source.gst,
+      gstInclusive: source.gstInclusive === true,
       mrp: hasPrice(source.mrp)
         ? source.mrp
         : priceOnRequest
@@ -333,10 +341,23 @@ const attemptStoreCheckout = async ({
     return { success: false, storeId, outOfStockLines };
   }
 
+  // [GST] proti item e GST calculate, tarpor totals
+  const gstItems = orderItems.map((i) => applyGstToItem(i, gstMode));
+
   // [QUOTE] price-less item totals e dhora hoy na
-  const { totalItems, totalMrp, totalAmount, discount } =
-    computeTotals(orderItems);
-  const priceStatus = orderItems.some((i) => i.priceOnRequest)
+  const {
+    totalItems,
+    totalMrp,
+    discount,
+    subtotal,
+    totalTaxable,
+    totalCgst,
+    totalSgst,
+    totalIgst,
+    totalGst,
+    totalAmount,
+  } = computeTotals(gstItems);
+  const priceStatus = gstItems.some((i) => i.priceOnRequest)
     ? "AWAITING_QUOTE"
     : "NOT_REQUIRED";
 
@@ -356,11 +377,18 @@ const attemptStoreCheckout = async ({
       storeId,
       storeName: store.storeName,
       storeUniqueId: store.storeUniqueId,
-      items: orderItems,
+      items: gstItems,
       totalItems,
       totalMrp,
       discount,
-      totalAmount,
+      gstMode,
+      subtotal,
+      totalTaxable,
+      totalCgst,
+      totalSgst,
+      totalIgst,
+      totalGst,
+      totalAmount, // payable (GST soho)
       priceStatus,
       deliveryAddress,
       deliveryInfo: delivery.info,
@@ -882,16 +910,19 @@ const respondToQuote = async (req, res) => {
         existing.quote.items.map((q) => [String(q.itemId), q.unitPrice]),
       );
 
-      // quote-er price item e fixed hoy
+      // quote-er price item e fixed hoy, tarpor [GST] calculate
       const items = existing.items.map((i) => {
         if (!i.priceOnRequest) return i;
         const unit = priceMap.get(String(i._id));
-        return {
-          ...i,
-          mrp: unit,
-          offerPrice: unit,
-          lineTotal: round2(unit * i.quantity),
-        };
+        return applyGstToItem(
+          {
+            ...i,
+            mrp: unit,
+            offerPrice: unit,
+            lineTotal: round2(unit * i.quantity),
+          },
+          existing.gstMode,
+        );
       });
 
       if (items.some((i) => !hasPrice(i.offerPrice))) {
@@ -908,6 +939,12 @@ const respondToQuote = async (req, res) => {
           items,
           totalMrp: totals.totalMrp,
           discount: totals.discount,
+          subtotal: totals.subtotal,
+          totalTaxable: totals.totalTaxable,
+          totalCgst: totals.totalCgst,
+          totalSgst: totals.totalSgst,
+          totalIgst: totals.totalIgst,
+          totalGst: totals.totalGst,
           totalAmount: totals.totalAmount,
           priceStatus: "CONFIRMED",
           // [PAYMENT] ONLINE order e quote accept er por theke 30 min payment window shuru
@@ -1316,7 +1353,7 @@ const submitQuote = async (req, res) => {
     const { items: quoteItems, note } = submitQuoteSchema.parse(req.body);
 
     const existing = await OrderModel.findById(orderId)
-      .select("storeId status priceStatus items")
+      .select("storeId status priceStatus items gstMode") // [GST] gstMode
       .lean();
     if (!existing) {
       return res
@@ -1365,14 +1402,17 @@ const submitQuote = async (req, res) => {
       quoteItems.map((q) => [String(q.itemId), round2(q.unitPrice)]),
     );
 
-    const total = round2(
-      existing.items.reduce((sum, i) => {
-        const unit = i.priceOnRequest
-          ? priceMap.get(String(i._id))
-          : i.offerPrice;
-        return sum + unit * i.quantity;
-      }, 0),
-    );
+    // [GST] estimate total e GST soho (accept korle ei total-i final hobe)
+    const simulated = existing.items.map((i) => {
+      const unit = i.priceOnRequest
+        ? priceMap.get(String(i._id))
+        : i.offerPrice;
+      return applyGstToItem(
+        { ...i, offerPrice: unit, lineTotal: round2(unit * i.quantity) },
+        existing.gstMode,
+      );
+    });
+    const total = computeTotals(simulated).totalAmount;
 
     const quotedAt = new Date();
 

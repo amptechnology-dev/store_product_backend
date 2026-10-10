@@ -10,6 +10,15 @@ const packagingDetailsSchema = z
   })
   .optional();
 
+const gstPercent = z.preprocess(
+  (v) => (v === "" || v === null || v === undefined ? undefined : v),
+  z.coerce.number().min(0).max(100).optional(),
+);
+
+const gstSchema = z
+  .object({ cgst: gstPercent, sgst: gstPercent, igst: gstPercent })
+  .optional();
+
 const createProductSchema = z.object({
   name: z.string().trim().min(1, "Product name is required"),
   description: z.string().trim().min(1, "Product description is required"),
@@ -21,6 +30,8 @@ const createProductSchema = z.object({
   offerPrice: z.coerce.number().min(0).optional(),
   openingStock: z.coerce.number().min(0).optional(),
   packagingDetails: packagingDetailsSchema,
+  gst: gstSchema,
+  gstInclusive: z.coerce.boolean().optional(),
   variants: z.array(z.record(z.any())).optional(),
 });
 
