@@ -123,6 +123,29 @@ const deliveryInfoSchema = new mongoose.Schema(
     maxDays: { type: Number },
     estimatedMinDate: { type: Date },
     estimatedMaxDate: { type: Date },
+    // [SHIPROCKET] estimate kothay theke ashche + courier er info
+    source: { type: String, enum: ["MANUAL", "SHIPROCKET"], default: "MANUAL" },
+    courierId: { type: Number, default: null },
+    courierName: { type: String, default: null },
+    shippingCharge: { type: Number, default: null },
+  },
+  { _id: false },
+);
+
+// [SHIPROCKET] courier shipment er info
+const shipmentSchema = new mongoose.Schema(
+  {
+    provider: { type: String, default: "SHIPROCKET" },
+    shiprocketOrderId: { type: Number, default: null },
+    shipmentId: { type: Number, default: null },
+    awb: { type: String, default: null },
+    courierId: { type: Number, default: null },
+    courierName: { type: String, default: null },
+    trackingUrl: { type: String, default: null },
+    status: { type: String, default: null },
+    pickupRequestedAt: { type: Date, default: null },
+    lastEventAt: { type: Date, default: null },
+    createdAt: { type: Date, default: Date.now },
   },
   { _id: false },
 );
@@ -193,7 +216,7 @@ const orderSchema = new mongoose.Schema(
     note: { type: String, default: null },
     expectedDeliveryDate: { type: Date, default: null },
     deliveryInfo: { type: deliveryInfoSchema, default: null },
-
+    shipment: { type: shipmentSchema, default: null },
     // ---------- payment ----------
     paymentMethod: { type: String, enum: PAYMENT_METHODS, default: "COD" },
     paymentStatus: {
@@ -229,6 +252,7 @@ orderSchema.index({ userId: 1, storeId: 1, createdAt: -1 });
 orderSchema.index({ storeId: 1, status: 1, createdAt: -1 });
 orderSchema.index({ storeId: 1, priceStatus: 1, createdAt: -1 });
 orderSchema.index({ checkoutId: 1 });
+orderSchema.index({ "shipment.awb": 1 });
 // payment lookup (callback e txnid diye order khuje pawa)
 orderSchema.index({ "paymentAttempts.txnid": 1 });
 // expire cron query

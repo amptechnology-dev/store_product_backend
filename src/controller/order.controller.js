@@ -45,6 +45,7 @@ const {
 const { checkStoreDelivery } = require("../helper/deliveryEstimate.js");
 // [GST]
 const { getGstMode, applyGstToItem } = require("../helper/gst.js");
+const { calcWeightKg } = require("../helper/shiprocket.js");
 
 // ===================== CONSTANTS / HELPERS =====================
 const ORDER_STATUSES = [
@@ -201,9 +202,20 @@ const attemptStoreCheckout = async ({
   });
   const productMap = new Map(products.map((p) => [String(p._id), p]));
 
+  const weightKg = calcWeightKg(
+    lines
+      .map((l) => ({
+        product: productMap.get(String(l.productId)),
+        variantId: cleanVariantId(l.variantId),
+        quantity: l.quantity,
+      }))
+      .filter((e) => e.product),
+  );
   const delivery = await checkStoreDelivery({
     storeId,
     pincode: deliveryAddress?.pincode,
+    weightKg,
+    cod: paymentMethod === "COD",
   });
   if (!delivery.deliverable) {
     return {

@@ -1,5 +1,6 @@
 const StoreDeliveryModel = require("../model/storeDelivery.model.js");
 const PincodeModel = require("../model/pincode.model.js");
+const shiprocket = require("./shiprocket.js");
 
 const EARTH_RADIUS_KM = 6378.1;
 const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
@@ -27,13 +28,19 @@ const addDaysFromToday = (days) => {
   return d;
 };
 
-const buildInfo = (mode, distanceKm, minDays, maxDays) => ({
+// source: MANUAL = store er nijer days, SHIPROCKET = courier er asol ETA / rate
+const buildInfo = (mode, distanceKm, minDays, maxDays, extra = {}) => ({
   mode,
   distanceKm,
   minDays,
   maxDays,
   estimatedMinDate: addDaysFromToday(minDays),
   estimatedMaxDate: addDaysFromToday(maxDays),
+  source: "MANUAL",
+  courierId: null,
+  courierName: null,
+  shippingCharge: null,
+  ...extra,
 });
 
 // Radius er moddhe kon kon pincode porche (store er jonno preview)
@@ -55,12 +62,64 @@ const countPincodesInRadius = ({ coordinates, radiusKm }) =>
     },
   });
 
+// NATIONAL: Shiprocket thakle courier er asol ETA, nahole store er manual days
+const resolveNational = async ({ cfg, pin, handling, weightKg, cod }) => {
+  if (shiprocket.isAvailable()) {
+    try {
+      const svc = await shiprocket.checkServiceability({
+        pickupPostcode: cfg.pincode,
+        deliveryPostcode: pin,
+        weightKg,
+        cod,
+      });
+
+      if (!svc.serviceable) return { serviceable: false, info: null };
+
+      // min = shobcheye druto courier, max = shobcheye sosta courier er ETA
+      const minDays = handling + svc.fastest.etaDays;
+      const maxDays = Math.max(minDays, handling + svc.cheapest.etaDays);
+
+      return {
+        serviceable: true,
+        info: buildInfo("NATIONAL", null, minDays, maxDays, {
+          source: "SHIPROCKET",
+          courierId: svc.cheapest.id,
+          courierName: svc.cheapest.name,
+          shippingCharge: svc.cheapest.rate,
+        }),
+      };
+    } catch (err) {
+      // Shiprocket e somossa hole order/listing atkabe na, manual estimate e fallback
+      console.error(
+        "Shiprocket serviceability failed, using manual estimate:",
+        err.message,
+      );
+    }
+  }
+
+  return {
+    serviceable: true,
+    info: buildInfo(
+      "NATIONAL",
+      null,
+      handling + (cfg.nationalMinDays || 0),
+      handling + (cfg.nationalMaxDays || 0),
+    ),
+  };
+};
+
 /**
  * Ekta store ei user pincode e deliver kore kina + date estimate.
  * Return: { deliverable, configured, message?, info }
  *  - configured=false : store e delivery setting nei -> kono restriction/estimate nei (purono store)
+ *  - weightKg / cod : shudhu NATIONAL (courier) hishabe lage. Listing e na dile default weight, prepaid
  */
-const checkStoreDelivery = async ({ storeId, pincode }) => {
+const checkStoreDelivery = async ({
+  storeId,
+  pincode,
+  weightKg,
+  cod = false,
+}) => {
   const cfg = await StoreDeliveryModel.findOne({
     storeId,
     isActive: true,
@@ -112,16 +171,23 @@ const checkStoreDelivery = async ({ storeId, pincode }) => {
 
   // ---------- NATIONAL: courier ----------
   if (allowNational) {
-    return {
-      deliverable: true,
-      configured: true,
-      info: buildInfo(
-        "NATIONAL",
-        null,
-        handling + (cfg.nationalMinDays || 0),
-        handling + (cfg.nationalMaxDays || 0),
-      ),
-    };
+    const national = await resolveNational({
+      cfg,
+      pin,
+      handling,
+      weightKg,
+      cod,
+    });
+
+    if (!national.serviceable) {
+      return {
+        deliverable: false,
+        configured: true,
+        info: null,
+        message: `Courier delivery is not available for pincode ${pin}`,
+      };
+    }
+    return { deliverable: true, configured: true, info: national.info };
   }
 
   return {
@@ -132,6 +198,7 @@ const checkStoreDelivery = async ({ storeId, pincode }) => {
   };
 };
 
+// ---------- listing / product card er jonno ----------
 const formatDeliveryLabel = (minDays, maxDays) => {
   if (minDays === maxDays) {
     if (minDays <= 0) return "Same day delivery";
@@ -143,7 +210,7 @@ const formatDeliveryLabel = (minDays, maxDays) => {
 
 /**
  * Product listing / detail e dekhanor jonno chhoto summary.
- * - pincode nei ba store e delivery setting nei -> null (frontend kichu dekhabe na / "enter pincode" dekhabe)
+ * - pincode nei ba store e delivery setting nei -> null
  * - deliverable na -> { deliverable: false, label: "..." }
  */
 const getDeliverySummary = async ({ storeId, pincode }) => {
@@ -162,12 +229,23 @@ const getDeliverySummary = async ({ storeId, pincode }) => {
       maxDays: null,
       estimatedMinDate: null,
       estimatedMaxDate: null,
+      shippingCharge: null,
+      courierName: null,
       label: result.message,
     };
   }
 
-  const { mode, distanceKm, minDays, maxDays, estimatedMinDate, estimatedMaxDate } =
-    result.info;
+  const {
+    mode,
+    distanceKm,
+    minDays,
+    maxDays,
+    estimatedMinDate,
+    estimatedMaxDate,
+    shippingCharge,
+    courierName,
+  } = result.info;
+
   return {
     deliverable: true,
     mode,
@@ -176,6 +254,8 @@ const getDeliverySummary = async ({ storeId, pincode }) => {
     maxDays,
     estimatedMinDate,
     estimatedMaxDate,
+    shippingCharge: shippingCharge ?? null,
+    courierName: courierName ?? null,
     label: formatDeliveryLabel(minDays, maxDays),
   };
 };
