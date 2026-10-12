@@ -10,15 +10,20 @@ const MAX_LIMIT = 100;
 const EPS = 0.005;
 
 const STORE_SHARE = {
-  $subtract: [
-    "$totalAmount",
+  $cond: [
+    { $eq: ["$deliveryInfo.source", "SHIPROCKET"] },
     {
-      $cond: [
-        { $eq: ["$deliveryInfo.source", "SHIPROCKET"] },
-        { $ifNull: ["$shippingCharge", 0] },
-        0,
+      $subtract: [
+        "$totalAmount",
+        {
+          $max: [
+            { $ifNull: ["$shippingCharge", 0] },
+            { $ifNull: ["$deliveryInfo.courierRate", 0] },
+          ],
+        },
       ],
     },
+    "$totalAmount",
   ],
 };
 

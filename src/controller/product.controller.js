@@ -1248,10 +1248,10 @@ const fetchStoreProducts = async (store, query, categoryId) => {
   const totalProducts = result?.totalCount?.[0]?.count || 0;
   const totalPages = Math.ceil(totalProducts / limit);
 
-  // [DELIVERY] delivery store-wise, tai ekbar-i hishab
   const delivery = await getDeliverySummary({
     storeId: store._id,
     pincode: query.pincode,
+    country: query.country,
   });
 
   return {
@@ -1418,6 +1418,7 @@ const getStoreProducts = async (req, res) => {
     const delivery = await getDeliverySummary({
       storeId: store._id,
       pincode: req.query.pincode,
+      country: req.query.country,
     });
 
     products = products.map((p) => {
@@ -1556,6 +1557,7 @@ const getStoreSingleProduct = async (req, res) => {
     const delivery = await getDeliverySummary({
       storeId: store._id,
       pincode: req.query.pincode,
+      country: req.query.country,
     });
 
     const relatedProducts = relatedRaw.map((p) => ({

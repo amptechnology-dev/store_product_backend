@@ -2,6 +2,7 @@ const StoreModel = require("../model/store.model.js");
 const StoreSettingModel = require("../model/storeSetting.model.js");
 const { updateStoreSettingSchema } = require("../schema/storeSetting.schema.js");
 const { DEFAULT_SETTINGS } = require("../helper/storeSettings.js");
+const { resolvePaymentMode } = require("../helper/storePolicy.js");
 
 const resolveStore = async (userId, storeId) => {
   if (storeId) return StoreModel.findOne({ _id: storeId, userId });
@@ -9,13 +10,17 @@ const resolveStore = async (userId, storeId) => {
 };
 
 // setting doc na thakle ba purono doc e notun field na thakle default
-const toPayload = (settings) => ({
-  hasStockManagement: settings
-    ? settings.hasStockManagement === true
-    : DEFAULT_SETTINGS.hasStockManagement,
-  hasDelivery: settings ? settings.hasDelivery !== false : true,
-  paymentFirst: settings ? settings.paymentFirst === true : false,
-});
+const toPayload = (settings) => {
+  const paymentMode = resolvePaymentMode(settings);
+  return {
+    hasStockManagement: settings
+      ? settings.hasStockManagement
+      : DEFAULT_SETTINGS.hasStockManagement,
+    hasDelivery: settings ? settings.hasDelivery !== false : true,
+    paymentMode,
+    paymentFirst: paymentMode === "ONLINE_ONLY",
+  };
+};
 
 const getStoreSettingsController = async (req, res) => {
   try {
@@ -41,21 +46,23 @@ const getStoreSettingsController = async (req, res) => {
 const updateStoreSettingsController = async (req, res) => {
   try {
     const userId = req.user?._id || req.user?.id;
-
-    // age validate, tarpor DB hit (invalid request e unnecessary query hobe na)
-    const parsed = updateStoreSettingSchema.parse(req.body);
-
     const storeId = req.body.storeId || req.query.storeId;
     const store = await resolveStore(userId, storeId);
     if (!store) {
       return res.status(404).json({ success: false, message: "Store not found" });
     }
 
-    // parsed e shudhu je field gulo pathano hoyeche shegulo thakbe,
-    // tai onno setting gulo overwrite hobe na
+    const parsed = updateStoreSettingSchema.parse(req.body);
+
+    const $set = { ...parsed };
+    // purono paymentFirst field ke paymentMode er sathe mil rakhi
+    if (parsed.paymentMode) {
+      $set.paymentFirst = parsed.paymentMode === "ONLINE_ONLY";
+    }
+
     const settings = await StoreSettingModel.findOneAndUpdate(
       { storeId: store._id },
-      { $set: parsed },
+      { $set },
       { new: true, upsert: true, setDefaultsOnInsert: true },
     );
 

@@ -5,12 +5,25 @@ const { getStorePolicy } = require("./storePolicy.js");
 
 const EARTH_RADIUS_KM = 6378.1;
 const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
+const UNIT_MINUTES = { MINUTES: 1, HOURS: 60, DAYS: 1440 };
 
+// ---------- small helpers ----------
 const isValidPincode = (p) => /^[1-9][0-9]{5}$/.test(String(p || "").trim());
+// India chara onno desher postal code (alphanumeric, 3-12 okkhor)
+const isValidPostalCode = (p) =>
+  /^[A-Za-z0-9][A-Za-z0-9 -]{1,10}[A-Za-z0-9]$/.test(String(p || "").trim());
+const isIndia = (country) => {
+  const c = String(country || "").trim().toLowerCase();
+  return !c || ["india", "in", "ind", "bharat"].includes(c);
+};
 
 const toRad = (d) => (d * Math.PI) / 180;
 const round1 = (n) => Math.round(n * 10) / 10;
 const round2 = (n) => Math.round((Number(n || 0) + Number.EPSILON) * 100) / 100;
+
+// value + unit -> minute
+const toMinutes = (value, unit = "DAYS") =>
+  Math.round(Math.max(0, Number(value) || 0) * (UNIT_MINUTES[unit] || 1440));
 
 // coordinates = [lng, lat]
 const haversineKm = ([lng1, lat1], [lng2, lat2]) => {
@@ -22,29 +35,88 @@ const haversineKm = ([lng1, lat1], [lng2, lat2]) => {
   return 2 * EARTH_RADIUS_KM * Math.asin(Math.sqrt(a));
 };
 
-// aaj (IST) theke n din por, date hishebe (T00:00:00.000Z — toDeliveryDate er moto)
-const addDaysFromToday = (days) => {
-  const d = new Date(Date.now() + IST_OFFSET_MS);
+// aaj (IST) theke n minute por je date (T00:00:00.000Z — toDeliveryDate er moto)
+const dateAfterMinutes = (minutes) => {
+  const d = new Date(Date.now() + IST_OFFSET_MS + minutes * 60000);
   d.setUTCHours(0, 0, 0, 0);
-  d.setUTCDate(d.getUTCDate() + days);
   return d;
 };
 
-// source: MANUAL = store er nijer days, SHIPROCKET = courier er asol ETA / rate
-// shippingCharge: customer er order total e jog hoy
-const buildInfo = (mode, distanceKm, minDays, maxDays, extra = {}) => ({
-  mode,
-  distanceKm,
-  minDays,
-  maxDays,
-  estimatedMinDate: addDaysFromToday(minDays),
-  estimatedMaxDate: addDaysFromToday(maxDays),
-  source: "MANUAL",
-  courierId: null,
-  courierName: null,
-  shippingCharge: 0,
-  ...extra,
-});
+const pluralize = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
+
+// "Delivery in 45 minutes" / "Delivery in 2 hours" / "Delivery in 4-7 days"
+const formatDurationLabel = (minMinutes, maxMinutes) => {
+  const lo = Math.max(0, Math.round(minMinutes));
+  const hi = Math.max(lo, Math.round(maxMinutes));
+
+  if (hi === 0) return "Same day delivery";
+
+  if (hi < 60) {
+    return lo === hi
+      ? `Delivery in ${pluralize(hi, "minute")}`
+      : `Delivery in ${lo}-${hi} minutes`;
+  }
+
+  if (hi < 1440) {
+    const toH = (m) => Math.round((m / 60) * 10) / 10;
+    const a = toH(lo);
+    const b = toH(hi);
+    return a === b
+      ? `Delivery in ${pluralize(b, "hour")}`
+      : `Delivery in ${a}-${b} hours`;
+  }
+
+  const a = Math.ceil(lo / 1440);
+  const b = Math.ceil(hi / 1440);
+  if (a === b) return b === 1 ? "Delivery in 1 day" : `Delivery in ${b} days`;
+  return `Delivery in ${a}-${b} days`;
+};
+
+// purono code er jonno alias
+const formatDeliveryLabel = (minDays, maxDays) =>
+  formatDurationLabel(minDays * 1440, maxDays * 1440);
+
+// store er dispatch time (minute e). Purono doc e handlingMinutes na thakle handlingDays theke
+const getHandlingMinutes = (cfg) =>
+  typeof cfg.handlingMinutes === "number"
+    ? cfg.handlingMinutes
+    : (cfg.handlingDays || 0) * 1440;
+
+// ---------- estimate info ----------
+// source: MANUAL = store er nijer somoy/charge, SHIPROCKET = courier er asol ETA / rate
+// shippingCharge: customer er order total e jog hoy. courierRate: courier ke asol je khoroch
+const buildInfo = (mode, distanceKm, minMinutes, maxMinutes, extra = {}) => {
+  const lo = Math.max(0, Math.round(minMinutes));
+  const hi = Math.max(lo, Math.round(maxMinutes));
+
+  const info = {
+    mode,
+    distanceKm,
+    minMinutes: lo,
+    maxMinutes: hi,
+    minDays: Math.ceil(lo / 1440),
+    maxDays: Math.ceil(hi / 1440),
+    etaLabel: formatDurationLabel(lo, hi),
+    estimatedMinDate: dateAfterMinutes(lo),
+    estimatedMaxDate: dateAfterMinutes(hi),
+    estimatedMaxAt: new Date(Date.now() + hi * 60000),
+    source: "MANUAL",
+    courierId: null,
+    courierName: null,
+    courierRate: null,
+    shippingCharge: 0,
+    baseShippingCharge: null,
+    shippingNote: null,
+    country: null,
+    pincode: null,
+    ...extra,
+  };
+
+  if (info.baseShippingCharge === null || info.baseShippingCharge === undefined) {
+    info.baseShippingCharge = info.shippingCharge;
+  }
+  return info;
+};
 
 // Radius er moddhe kon kon pincode porche (store er jonno preview)
 const findPincodesInRadius = ({ coordinates, radiusKm, limit = 500 }) =>
@@ -65,8 +137,35 @@ const countPincodesInRadius = ({ coordinates, radiusKm }) =>
     },
   });
 
-// NATIONAL: Shiprocket thakle courier er asol ETA + rate, nahole store er manual days + fallback charge
-const resolveNational = async ({ cfg, pin, handling, weightKg, cod }) => {
+// ---------- LOCAL: distance slab ----------
+// distance jei prothom slab er upToKm er moddhe sheta. Sob slab er baire hole shesh slab
+const pickSlab = (slabs, distanceKm) => {
+  if (!Array.isArray(slabs) || slabs.length === 0) return null;
+  const sorted = [...slabs].sort((a, b) => a.upToKm - b.upToKm);
+  return sorted.find((s) => distanceKm <= s.upToKm) || sorted[sorted.length - 1];
+};
+
+const resolveLocal = ({ cfg, distanceKm, handlingMin, pin }) => {
+  const slab = pickSlab(cfg.localSlabs, distanceKm);
+
+  const etaMin = slab
+    ? typeof slab.etaMinutes === "number"
+      ? slab.etaMinutes
+      : toMinutes(slab.etaValue, slab.etaUnit)
+    : (cfg.localDeliveryDays || 0) * 1440;
+
+  const charge = round2(slab ? slab.charge : cfg.localDeliveryCharge);
+  const total = handlingMin + etaMin;
+
+  return buildInfo("LOCAL", distanceKm, total, total, {
+    shippingCharge: charge,
+    shippingNote: slab ? `Within ${slab.upToKm} km` : "Local delivery",
+    pincode: pin,
+  });
+};
+
+// ---------- NATIONAL: Shiprocket thakle courier er asol ETA + rate, nahole manual ----------
+const resolveNational = async ({ cfg, pin, handlingMin, weightKg, cod }) => {
   if (shiprocket.isAvailable()) {
     try {
       const svc = await shiprocket.checkServiceability({
@@ -79,16 +178,20 @@ const resolveNational = async ({ cfg, pin, handling, weightKg, cod }) => {
       if (!svc.serviceable) return { serviceable: false, info: null };
 
       // min = shobcheye druto courier, max = shobcheye sosta courier er ETA
-      const minDays = handling + svc.fastest.etaDays;
-      const maxDays = Math.max(minDays, handling + svc.cheapest.etaDays);
+      const minMin = handlingMin + svc.fastest.etaDays * 1440;
+      const maxMin = Math.max(minMin, handlingMin + svc.cheapest.etaDays * 1440);
+      const rate = round2(svc.cheapest.rate);
 
       return {
         serviceable: true,
-        info: buildInfo("NATIONAL", null, minDays, maxDays, {
+        info: buildInfo("NATIONAL", null, minMin, maxMin, {
           source: "SHIPROCKET",
           courierId: svc.cheapest.id,
           courierName: svc.cheapest.name,
-          shippingCharge: round2(svc.cheapest.rate),
+          courierRate: rate,
+          shippingCharge: rate,
+          shippingNote: `Courier (${svc.cheapest.name}) to ${pin}`,
+          pincode: pin,
         }),
       };
     } catch (err) {
@@ -105,23 +208,135 @@ const resolveNational = async ({ cfg, pin, handling, weightKg, cod }) => {
     info: buildInfo(
       "NATIONAL",
       null,
-      handling + (cfg.nationalMinDays || 0),
-      handling + (cfg.nationalMaxDays || 0),
-      { shippingCharge: round2(cfg.nationalFallbackCharge) },
+      handlingMin + (cfg.nationalMinDays || 0) * 1440,
+      handlingMin + (cfg.nationalMaxDays || 0) * 1440,
+      {
+        shippingCharge: round2(cfg.nationalFallbackCharge),
+        shippingNote: `Courier delivery to ${pin}`,
+        pincode: pin,
+      },
     ),
   };
 };
 
+// ---------- INTERNATIONAL ----------
+// Shiprocket couriers pele seta, nahole store er manual days + charge
+const resolveInternational = async ({
+  cfg,
+  pin,
+  country,
+  handlingMin,
+  weightKg,
+}) => {
+  const countryCode = shiprocket.toCountryCode(country);
+
+  if (shiprocket.isAvailable() && countryCode) {
+    try {
+      const svc = await shiprocket.checkInternationalServiceability({
+        pickupPostcode: cfg.pincode,
+        countryCode,
+        weightKg,
+      });
+
+      if (svc.serviceable) {
+        const minMin = handlingMin + svc.fastest.etaDays * 1440;
+        const maxMin = Math.max(
+          minMin,
+          handlingMin + svc.cheapest.etaDays * 1440,
+        );
+        const rate = round2(svc.cheapest.rate);
+
+        return buildInfo("INTERNATIONAL", null, minMin, maxMin, {
+          source: "SHIPROCKET",
+          courierId: svc.cheapest.id,
+          courierName: svc.cheapest.name,
+          courierRate: rate,
+          shippingCharge: rate,
+          shippingNote: `International courier to ${country}`,
+          country,
+          pincode: pin,
+        });
+      }
+    } catch (err) {
+      console.error("International estimate failed, using manual:", err.message);
+    }
+  }
+
+  return buildInfo(
+    "INTERNATIONAL",
+    null,
+    handlingMin + (cfg.internationalMinDays ?? 7) * 1440,
+    handlingMin + (cfg.internationalMaxDays ?? 14) * 1440,
+    {
+      shippingCharge: round2(cfg.internationalFallbackCharge),
+      shippingNote: `International shipping to ${country}`,
+      country,
+      pincode: pin,
+    },
+  );
+};
+
+// ---------- ORDER VALUE RULES ----------
+// items er total >= minOrderValue emon rule er moddhe shobcheye boro minOrderValue wala rule-ta jitbe
+const applyChargeRules = (baseCharge, itemsTotal, rules) => {
+  const total = Number(itemsTotal);
+  if (!Number.isFinite(total) || !Array.isArray(rules) || rules.length === 0) {
+    return { charge: baseCharge, rule: null };
+  }
+  const matched = rules
+    .filter((r) => total >= r.minOrderValue)
+    .sort((a, b) => b.minOrderValue - a.minOrderValue)[0];
+
+  return matched
+    ? { charge: round2(matched.charge), rule: matched }
+    : { charge: baseCharge, rule: null };
+};
+
 /**
- * Ekta store ei user pincode e deliver kore kina + date estimate + shipping charge.
- * Return: { deliverable, configured, message?, info }
+ * checkStoreDelivery er result + order er items total diye shipping charge final kore.
+ * Order create / checkout preview e items total ber hoar por eta chalate hoy.
+ * INTERNATIONAL e rule lage na (courier er asol khoroch-i)
+ */
+const finalizeShipping = (delivery, itemsTotal) => {
+  const info = delivery?.info;
+  if (!info) return null;
+
+  const base = info.shippingCharge;
+  if (info.mode === "INTERNATIONAL") return { ...info, baseShippingCharge: base };
+
+  const { charge, rule } = applyChargeRules(base, itemsTotal, delivery.chargeRules);
+  if (!rule) return { ...info, baseShippingCharge: base };
+
+  return {
+    ...info,
+    baseShippingCharge: base,
+    shippingCharge: charge,
+    shippingNote:
+      charge === 0
+        ? `Free delivery on orders of ₹${rule.minOrderValue} or more`
+        : `Delivery ₹${charge} on orders of ₹${rule.minOrderValue} or more`,
+  };
+};
+
+const notDeliverable = (message) => ({
+  deliverable: false,
+  configured: true,
+  info: null,
+  message,
+});
+
+/**
+ * Ekta store ei address e deliver kore kina + somoy + shipping charge.
+ * Return: { deliverable, configured, message?, info, chargeRules }
  *  - configured=false : store e delivery off ba setting nei -> kono restriction / estimate / charge nei
- *  - weightKg / cod : shudhu NATIONAL (courier) hishabe lage. Listing e na dile default weight, prepaid
+ *  - country : India na hole international (store allowInternational + courier ON thakte hobe)
+ *  - weightKg / cod : courier hishabe lage. cod = courier COD collect korbe kina
  *  - policy : getStorePolicy er result (dile abar DB query hoy na)
  */
 const checkStoreDelivery = async ({
   storeId,
   pincode,
+  country,
   weightKg,
   cod = false,
   policy,
@@ -141,19 +356,43 @@ const checkStoreDelivery = async ({
   if (!cfg) return { deliverable: true, configured: false, info: null };
 
   const pin = String(pincode || "").trim();
-  if (!isValidPincode(pin)) {
-    return {
-      deliverable: false,
-      configured: true,
-      info: null,
-      message: "Please enter a valid 6 digit pincode",
-    };
-  }
-
-  const handling = cfg.handlingDays || 0;
+  const handlingMin = getHandlingMinutes(cfg);
   const allowLocal = cfg.deliveryType === "LOCAL" || cfg.deliveryType === "BOTH";
   const allowNational =
     cfg.deliveryType === "NATIONAL" || cfg.deliveryType === "BOTH";
+
+  // ---------- INTERNATIONAL (India chara onno desh) ----------
+  if (!isIndia(country)) {
+    const countryName = String(country).trim();
+
+    if (!allowNational || cfg.allowInternational !== true) {
+      return notDeliverable(`This store does not ship to ${countryName}`);
+    }
+    if (!isValidPostalCode(pin)) {
+      return notDeliverable("Please enter a valid postal code");
+    }
+    if (cod) {
+      return notDeliverable(
+        "Cash on Delivery is not available for international orders",
+      );
+    }
+
+    const info = await resolveInternational({
+      cfg,
+      pin,
+      country: countryName,
+      handlingMin,
+      weightKg,
+    });
+    return { deliverable: true, configured: true, info, chargeRules: [] };
+  }
+
+  // ---------- INDIA ----------
+  if (!isValidPincode(pin)) {
+    return notDeliverable("Please enter a valid 6 digit pincode");
+  }
+
+  const chargeRules = cfg.chargeRules || [];
 
   // ---------- LOCAL: radius check ----------
   if (allowLocal && cfg.radiusKm) {
@@ -173,13 +412,11 @@ const checkStoreDelivery = async ({
     }
 
     if (distanceKm !== null && distanceKm <= cfg.radiusKm) {
-      const days = handling + (cfg.localDeliveryDays || 0);
       return {
         deliverable: true,
         configured: true,
-        info: buildInfo("LOCAL", distanceKm, days, days, {
-          shippingCharge: round2(cfg.localDeliveryCharge),
-        }),
+        info: resolveLocal({ cfg, distanceKm, handlingMin, pin }),
+        chargeRules,
       };
     }
   }
@@ -189,53 +426,52 @@ const checkStoreDelivery = async ({
     const national = await resolveNational({
       cfg,
       pin,
-      handling,
+      handlingMin,
       weightKg,
       cod,
     });
 
     if (!national.serviceable) {
-      return {
-        deliverable: false,
-        configured: true,
-        info: null,
-        message: `Courier delivery is not available for pincode ${pin}`,
-      };
+      return notDeliverable(
+        `Courier delivery is not available for pincode ${pin}`,
+      );
     }
-    return { deliverable: true, configured: true, info: national.info };
+    return {
+      deliverable: true,
+      configured: true,
+      info: national.info,
+      chargeRules,
+    };
   }
 
-  return {
-    deliverable: false,
-    configured: true,
-    info: null,
-    message: `This store does not deliver to pincode ${pin}`,
-  };
-};
-
-// ---------- listing / product card er jonno ----------
-const formatDeliveryLabel = (minDays, maxDays) => {
-  if (minDays === maxDays) {
-    if (minDays <= 0) return "Same day delivery";
-    if (minDays === 1) return "Delivery in 1 day";
-    return `Delivery in ${minDays} days`;
-  }
-  return `Delivery in ${minDays}-${maxDays} days`;
+  // radius er baire + courier off
+  return notDeliverable(`This store does not deliver to pincode ${pin}`);
 };
 
 /**
  * Product listing / detail e dekhanor jonno chhoto summary.
  * - pincode nei, store e delivery off, ba setting nei -> null
  * - deliverable na -> { deliverable: false, label: "..." }
+ * - itemsTotal dile order value rule dhore charge hishab hoy
  */
-const getDeliverySummary = async ({ storeId, pincode }) => {
+const getDeliverySummary = async ({
+  storeId,
+  pincode,
+  country,
+  itemsTotal = null,
+}) => {
   const pin = String(pincode || "").trim();
   if (!pin) return null;
 
   const policy = await getStorePolicy(storeId);
   if (!policy.hasDelivery) return null;
 
-  const result = await checkStoreDelivery({ storeId, pincode: pin, policy });
+  const result = await checkStoreDelivery({
+    storeId,
+    pincode: pin,
+    country,
+    policy,
+  });
   if (!result.configured) return null;
 
   if (!result.deliverable) {
@@ -243,47 +479,62 @@ const getDeliverySummary = async ({ storeId, pincode }) => {
       deliverable: false,
       mode: null,
       distanceKm: null,
+      minMinutes: null,
+      maxMinutes: null,
       minDays: null,
       maxDays: null,
       estimatedMinDate: null,
       estimatedMaxDate: null,
+      estimatedMaxAt: null,
       shippingCharge: null,
+      freeDeliveryAbove: null,
+      shippingNote: null,
       courierName: null,
       label: result.message,
     };
   }
 
-  const {
-    mode,
-    distanceKm,
-    minDays,
-    maxDays,
-    estimatedMinDate,
-    estimatedMaxDate,
-    shippingCharge,
-    courierName,
-  } = result.info;
+  const info =
+    itemsTotal !== null && itemsTotal !== undefined
+      ? finalizeShipping(result, itemsTotal)
+      : result.info;
+
+  // "eto taka er upor free delivery" dekhanor jonno
+  const freeRules = (result.chargeRules || [])
+    .filter((r) => r.charge === 0)
+    .map((r) => r.minOrderValue);
+  const freeDeliveryAbove = freeRules.length ? Math.min(...freeRules) : null;
 
   return {
     deliverable: true,
-    mode,
-    distanceKm,
-    minDays,
-    maxDays,
-    estimatedMinDate,
-    estimatedMaxDate,
-    shippingCharge: shippingCharge ?? 0,
-    courierName: courierName ?? null,
-    label: formatDeliveryLabel(minDays, maxDays),
+    mode: info.mode,
+    distanceKm: info.distanceKm,
+    minMinutes: info.minMinutes,
+    maxMinutes: info.maxMinutes,
+    minDays: info.minDays,
+    maxDays: info.maxDays,
+    estimatedMinDate: info.estimatedMinDate,
+    estimatedMaxDate: info.estimatedMaxDate,
+    estimatedMaxAt: info.estimatedMaxAt,
+    shippingCharge: info.shippingCharge ?? 0,
+    freeDeliveryAbove,
+    shippingNote: info.shippingNote,
+    courierName: info.courierName ?? null,
+    label: info.etaLabel,
   };
 };
 
 module.exports = {
   isValidPincode,
+  isValidPostalCode,
+  isIndia,
   haversineKm,
+  toMinutes,
   findPincodesInRadius,
   countPincodesInRadius,
   checkStoreDelivery,
+  finalizeShipping,
+  formatDurationLabel,
   formatDeliveryLabel,
   getDeliverySummary,
 };

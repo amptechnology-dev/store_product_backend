@@ -22,7 +22,7 @@ const deliveryAddressInputSchema = z.object({
   area: z.string().trim().optional(),
   city: z.string().trim().min(1, "City is required"),
   state: z.string().trim().min(1, "State is required"),
-  pincode: z.string().trim().min(4, "Pincode is required"),
+  pincode: z.string().trim().min(3, "Enter a valid postal code").max(12),
   country: z.string().trim().optional(),
 });
 

@@ -126,11 +126,13 @@ const resolveScope = async (req, storeId) => {
   return { role, stores, storeIds: stores.map((s) => s._id) };
 };
 
-// ---------- common $match (store scope + date + method/status filter) ----------
 const buildMatch = (storeIds, query, extra = {}) => {
   const match = { ...extra };
   // storeIds null = ADMIN, shob store
   if (storeIds) match.storeId = { $in: storeIds };
+
+  // [PAYMENT OFF] jei store e payment off, tader order payment report e dhora hobe na
+  match.paymentOff = { $ne: true };
 
   const range = parseDateRange(query.from, query.to);
   if (range.error) return { error: range.error };

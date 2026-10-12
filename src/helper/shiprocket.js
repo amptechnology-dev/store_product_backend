@@ -216,6 +216,78 @@ const checkServiceability = async ({
   return value;
 };
 
+const INTL_ERROR_CACHE_TTL_MS = 10 * 60 * 1000;
+
+// desher naam -> ISO code (2 okkhorer code dile seta-i use hoy). Shiprocket er supported 44 desh er sathe mil rakho
+const COUNTRY_CODES = {
+  "united states": "US", usa: "US", us: "US",
+  "united kingdom": "GB", uk: "GB", gb: "GB", england: "GB",
+  canada: "CA", australia: "AU", "new zealand": "NZ",
+  "united arab emirates": "AE", uae: "AE", "saudi arabia": "SA",
+  qatar: "QA", kuwait: "KW", oman: "OM", bahrain: "BH",
+  singapore: "SG", malaysia: "MY", thailand: "TH", indonesia: "ID",
+  philippines: "PH", vietnam: "VN", "hong kong": "HK", japan: "JP",
+  "south korea": "KR", china: "CN",
+  germany: "DE", france: "FR", italy: "IT", spain: "ES", portugal: "PT",
+  netherlands: "NL", belgium: "BE", ireland: "IE", switzerland: "CH",
+  austria: "AT", sweden: "SE", norway: "NO", denmark: "DK", finland: "FI",
+  poland: "PL", turkey: "TR", israel: "IL",
+  bangladesh: "BD", nepal: "NP", "sri lanka": "LK", bhutan: "BT",
+  "south africa": "ZA", nigeria: "NG", kenya: "KE",
+  brazil: "BR", mexico: "MX",
+};
+
+const toCountryCode = (country) => {
+  const c = String(country || "").trim().toLowerCase();
+  if (!c) return null;
+  if (/^[a-z]{2}$/.test(c)) return c.toUpperCase();
+  return COUNTRY_CODES[c] || null;
+};
+
+const cacheSet = (key, value, ttl) => {
+  if (serviceCache.size >= SERVICE_CACHE_MAX) {
+    serviceCache.delete(serviceCache.keys().next().value);
+  }
+  serviceCache.set(key, { value, expiresAt: Date.now() + ttl });
+};
+
+const checkInternationalServiceability = async ({
+  pickupPostcode,
+  countryCode,
+  weightKg,
+}) => {
+  const weight =
+    Math.round((Number(weightKg) > 0 ? Number(weightKg) : getDefaultWeightKg()) * 100) /
+    100;
+  const key = `INTL|${pickupPostcode}|${countryCode}|${weight}`;
+
+  const hit = serviceCache.get(key);
+  if (hit && hit.expiresAt > Date.now()) return hit.value;
+
+  let value;
+  let ttl = SERVICE_CACHE_TTL_MS;
+  try {
+    const data = await request("GET", "/international/courier/serviceability", {
+      query: {
+        pickup_postcode: pickupPostcode,
+        delivery_country: countryCode,
+        weight,
+        cod: 0, // international e COD hoy na
+      },
+    });
+    value = normalizeServiceability(data, false);
+  } catch (err) {
+    // param / endpoint mile na gele ba Shiprocket e somossa hole manual fallback e jabe
+    console.error("Shiprocket international serviceability failed:", err.message);
+    markDown(err);
+    value = { serviceable: false, couriers: [], error: true };
+    ttl = INTL_ERROR_CACHE_TTL_MS;
+  }
+
+  cacheSet(key, value, ttl);
+  return value;
+};
+
 // ---------- shipment ----------
 const createAdhocOrder = (payload) =>
   request("POST", "/orders/create/adhoc", { body: payload });
@@ -295,6 +367,8 @@ module.exports = {
   isConfigured,
   isAvailable,
   checkServiceability,
+  checkInternationalServiceability,
+  toCountryCode,
   createAdhocOrder,
   assignAwb,
   generatePickup,

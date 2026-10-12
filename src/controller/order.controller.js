@@ -42,14 +42,15 @@ const {
   computeTotals,
   QUOTE_PENDING_STATUSES,
 } = require("../helper/priceQuote.js");
-const { checkStoreDelivery } = require("../helper/deliveryEstimate.js");
+const { checkStoreDelivery,finalizeShipping } = require("../helper/deliveryEstimate.js");
 // [GST]
 const { getGstMode, applyGstToItem } = require("../helper/gst.js");
 const { calcWeightKg } = require("../helper/shiprocket.js");
 const {
   getStorePolicy,
-  COD_NOT_ALLOWED_MESSAGE,
+  resolvePaymentForStore,
 } = require("../helper/storePolicy.js");
+
 
 // ===================== CONSTANTS / HELPERS =====================
 const ORDER_STATUSES = [
@@ -192,6 +193,7 @@ const attemptStoreCheckout = async ({
   deliveryAddress,
   note,
   paymentMethod,
+  dryRun = false,
 }) => {
   const store = await StoreModel.findOne({
     _id: storeId,
@@ -203,6 +205,7 @@ const attemptStoreCheckout = async ({
     return {
       success: false,
       storeId,
+      code: "STORE_UNAVAILABLE",
       message: "This store is not present in this application",
     };
   }
@@ -215,28 +218,39 @@ const attemptStoreCheckout = async ({
   });
   const productMap = new Map(products.map((p) => [String(p._id), p]));
 
+  // [PAYMENT] store er payment mode onujayi payment method thik kora
   const policy = await getStorePolicy(storeId);
-  if (paymentMethod === "COD" && !policy.codAllowed) {
-    return { success: false, storeId, message: COD_NOT_ALLOWED_MESSAGE };
+  const payment = resolvePaymentForStore(policy, paymentMethod);
+  if (!payment.ok) {
+    return {
+      success: false,
+      storeId,
+      code: payment.code,
+      message: payment.message,
+    };
   }
+  const effectiveMethod = payment.method; // "COD" | "ONLINE"
+  const paymentOff = payment.paymentOff;
 
-  // [DELIVERY + SHIPPING] pincode check + shipping charge (delivery off hole kichui hobe na)
+  // [DELIVERY + SHIPPING] address check + somoy + charge (delivery off hole kichui hobe na)
   const delivery = await checkStoreDelivery({
     storeId,
     pincode: deliveryAddress?.pincode,
+    country: deliveryAddress?.country,
     weightKg: linesWeightKg(lines, productMap),
-    cod: paymentMethod === "COD",
+    // courier COD collect korbe shudhu jodi app e COD hoy (payment off hole na)
+    cod: effectiveMethod === "COD" && !paymentOff,
     policy,
   });
   if (!delivery.deliverable) {
     return {
       success: false,
       storeId,
+      code: "NOT_DELIVERABLE",
       message:
-        delivery.message || "This store does not deliver to your pincode",
+        delivery.message || "This store does not deliver to your address",
     };
   }
-  const shippingCharge = round2(delivery.info?.shippingCharge || 0);
 
   // [GST] store state != delivery state hole IGST, nahole CGST+SGST
   const gstMode = getGstMode(store.state, deliveryAddress?.state);
@@ -294,43 +308,58 @@ const attemptStoreCheckout = async ({
         continue;
       }
 
-      const result = await decrementStockForLine({
-        productId: product._id,
-        variantId: unit.variantId,
-        sizeVariantId: unit.sizeVariantId,
-        quantity: line.quantity,
-      });
-
-      if (!result.success) {
-        outOfStockLines.push({
-          productId: line.productId,
-          variantId: line.variantId,
-          name: product.name,
-          availableStock: unit.currentStock,
-          requestedQuantity: line.quantity,
-          reason: "INSUFFICIENT_STOCK",
+      if (dryRun) {
+        // preview: stock minus na kore shudhu check
+        if (Number(unit.currentStock) < Number(line.quantity)) {
+          outOfStockLines.push({
+            productId: line.productId,
+            variantId: line.variantId,
+            name: product.name,
+            availableStock: unit.currentStock,
+            requestedQuantity: line.quantity,
+            reason: "INSUFFICIENT_STOCK",
+          });
+          continue;
+        }
+      } else {
+        const result = await decrementStockForLine({
+          productId: product._id,
+          variantId: unit.variantId,
+          sizeVariantId: unit.sizeVariantId,
+          quantity: line.quantity,
         });
-        continue;
-      }
 
-      // [STOCK] rollback + SALE log shudhu stock managed line er jonno
-      decrementedLines.push({
-        productId: product._id,
-        storeId: product.storeId,
-        variantId: unit.variantId,
-        sizeVariantId: unit.sizeVariantId,
-        quantity: line.quantity,
-        productName: product.name,
-        variantLabel:
-          [source.color, source.size, source.weight, source.height]
-            .filter(Boolean)
-            .join(" / ") || "Default",
-        newStock: findUnitStock(
-          result.product,
-          unit.variantId,
-          unit.sizeVariantId,
-        ),
-      });
+        if (!result.success) {
+          outOfStockLines.push({
+            productId: line.productId,
+            variantId: line.variantId,
+            name: product.name,
+            availableStock: unit.currentStock,
+            requestedQuantity: line.quantity,
+            reason: "INSUFFICIENT_STOCK",
+          });
+          continue;
+        }
+
+        // [STOCK] rollback + SALE log shudhu stock managed line er jonno
+        decrementedLines.push({
+          productId: product._id,
+          storeId: product.storeId,
+          variantId: unit.variantId,
+          sizeVariantId: unit.sizeVariantId,
+          quantity: line.quantity,
+          productName: product.name,
+          variantLabel:
+            [source.color, source.size, source.weight, source.height]
+              .filter(Boolean)
+              .join(" / ") || "Default",
+          newStock: findUnitStock(
+            result.product,
+            unit.variantId,
+            unit.sizeVariantId,
+          ),
+        });
+      }
     }
 
     orderItems.push({
@@ -362,7 +391,7 @@ const attemptStoreCheckout = async ({
   // ---------- kono line fail korle shob decrement rollback ----------
   if (outOfStockLines.length > 0) {
     await rollbackLines(decrementedLines);
-    return { success: false, storeId, outOfStockLines };
+    return { success: false, storeId, code: "OUT_OF_STOCK", outOfStockLines };
   }
 
   // [GST] proti item e GST calculate, tarpor totals
@@ -385,14 +414,42 @@ const attemptStoreCheckout = async ({
     ? "AWAITING_QUOTE"
     : "NOT_REQUIRED";
 
+  // [SHIPPING] items payable dhore order value rule (eto taka er upor free ityadi) chalano,
+  // tarpor items + shipping = customer er total payable (PayU eta-i nibe)
   const itemsTotal = totalAmount;
+  const shippingInfo = finalizeShipping(delivery, itemsTotal); // delivery off hole null
+  const shippingCharge = round2(shippingInfo?.shippingCharge || 0);
   const grandTotal = round2(itemsTotal + shippingCharge);
+
+  // ---------- preview: order create / stock minus na kore hishab ferot ----------
+  if (dryRun) {
+    return {
+      success: true,
+      dryRun: true,
+      storeId,
+      preview: {
+        totalItems,
+        totalMrp,
+        discount,
+        totalGst,
+        itemsTotal,
+        shippingCharge,
+        grandTotal,
+        delivery: shippingInfo,
+        deliveryEnabled: policy.hasDelivery,
+        paymentMode: policy.paymentMode,
+        paymentMethod: effectiveMethod,
+        paymentOff,
+        priceStatus,
+      },
+    };
+  }
 
   // [PAYMENT] ONLINE + price already fixed hole 30 min er payment window.
   // Quote lagbe emon order e window shuru hoy user quote accept korle (respondToQuote),
   // nahole quote asar age-i order auto-cancel hoye jabe.
   const paymentExpiresAt =
-    paymentMethod === "ONLINE" && priceStatus === "NOT_REQUIRED"
+    effectiveMethod === "ONLINE" && priceStatus === "NOT_REQUIRED"
       ? new Date(Date.now() + PAYMENT_WINDOW_MS)
       : null;
 
@@ -415,15 +472,16 @@ const attemptStoreCheckout = async ({
       totalSgst,
       totalIgst,
       totalGst,
-      itemsTotal,
+      itemsTotal, // items er payable (GST soho), shipping baad
       shippingCharge,
       deliveryEnabled: policy.hasDelivery,
-      totalAmount: grandTotal,
+      totalAmount: grandTotal, // payable (GST + shipping soho)
       priceStatus,
       deliveryAddress,
-      deliveryInfo: delivery.info,
+      deliveryInfo: shippingInfo,
       note,
-      paymentMethod,
+      paymentMethod: effectiveMethod,
+      paymentOff,
       paymentStatus: "PENDING",
       paymentExpiresAt,
       status: "PENDING",
@@ -1523,86 +1581,64 @@ const submitQuote = async (req, res) => {
   }
 };
 
-const PREVIEW_PRODUCT_FIELDS =
-  "storeId packagingDetails variants._id variants.packagingDetails variants.sizeVariants._id variants.sizeVariants.packagingDetails";
+const previewStore = async ({
+  userId,
+  storeId,
+  lines,
+  deliveryAddress,
+  paymentMethod,
+}) => {
+  const [store, policy] = await Promise.all([
+    StoreModel.findById(storeId).select("storeName storeUniqueId").lean(),
+    getStorePolicy(storeId),
+  ]);
 
-const previewStore = async ({ storeId, lines, pincode, paymentMethod }) => {
-  const store = await StoreModel.findOne({
-    _id: storeId,
-    ...AVAILABLE_STORE_FILTER,
-  })
-    .select("storeName storeUniqueId")
-    .lean();
-
-  if (!store) {
-    return {
-      storeId,
-      ok: false,
-      code: "STORE_UNAVAILABLE",
-      message: "This store is not present in this application",
-      shippingCharge: 0,
-      delivery: null,
-      codAvailable: false,
-      paymentFirst: false,
-      deliveryEnabled: false,
-    };
-  }
-
-  const policy = await getStorePolicy(storeId);
   const base = {
     storeId,
-    storeName: store.storeName,
-    storeUniqueId: store.storeUniqueId,
+    storeName: store?.storeName || null,
+    storeUniqueId: store?.storeUniqueId || null,
+    paymentMode: policy.paymentMode,
     codAvailable: policy.codAllowed,
-    paymentFirst: policy.paymentFirst,
+    onlineAvailable: policy.onlineAllowed,
     deliveryEnabled: policy.hasDelivery,
   };
 
-  if (paymentMethod === "COD" && !policy.codAllowed) {
-    return {
-      ...base,
-      ok: false,
-      code: "COD_NOT_ALLOWED",
-      message: COD_NOT_ALLOWED_MESSAGE,
-      shippingCharge: 0,
-      delivery: null,
-    };
-  }
-
-  const productIds = [...new Set(lines.map((l) => String(l.productId)))];
-  const products = await ProductModel.find({
-    _id: { $in: productIds },
-    isActive: true,
-    isVerified: true,
-  })
-    .select(PREVIEW_PRODUCT_FIELDS)
-    .lean();
-  const productMap = new Map(products.map((p) => [String(p._id), p]));
-
-  const delivery = await checkStoreDelivery({
+  const result = await attemptStoreCheckout({
+    userId,
     storeId,
-    pincode,
-    weightKg: linesWeightKg(lines, productMap),
-    cod: paymentMethod === "COD",
-    policy,
+    lines,
+    deliveryAddress,
+    note: null,
+    paymentMethod,
+    dryRun: true,
   });
 
-  if (!delivery.deliverable) {
+  if (!result.success) {
     return {
       ...base,
       ok: false,
-      code: "NOT_DELIVERABLE",
-      message: delivery.message,
+      code: result.code || "BLOCKED",
+      message: result.message || "Some items are not available",
+      outOfStockLines: result.outOfStockLines,
+      itemsTotal: 0,
       shippingCharge: 0,
+      grandTotal: 0,
       delivery: null,
     };
   }
 
+  const p = result.preview;
   return {
     ...base,
     ok: true,
-    shippingCharge: round2(delivery.info?.shippingCharge || 0),
-    delivery: delivery.info,
+    paymentMethod: p.paymentMethod,
+    paymentOff: p.paymentOff,
+    priceStatus: p.priceStatus,
+    totalItems: p.totalItems,
+    itemsTotal: p.itemsTotal,
+    shippingCharge: p.shippingCharge,
+    grandTotal: p.grandTotal,
+    delivery: p.delivery,
   };
 };
 
@@ -1610,14 +1646,15 @@ const checkoutPreview = async (req, res) => {
   try {
     const userId = getUserId(req);
     const { cartId, storeIds, productId, variantId, quantity } = req.body || {};
-    const pincode = String(req.body?.pincode || "").trim();
     const paymentMethod = req.body?.paymentMethod === "COD" ? "COD" : "ONLINE";
 
-    if (!/^[1-9][0-9]{5}$/.test(pincode)) {
-      return res
-        .status(400)
-        .json({ success: false, message: "Enter a valid 6 digit pincode" });
-    }
+    const addr = req.body?.deliveryAddress || {};
+    const deliveryAddress = {
+      pincode: String(addr.pincode ?? req.body?.pincode ?? "").trim(),
+      state: addr.state ?? req.body?.state ?? "",
+      country:
+        String(addr.country ?? req.body?.country ?? "India").trim() || "India",
+    };
 
     // ---------- store wise lines (checkout / buyNow er moto) ----------
     const groups = new Map();
@@ -1689,19 +1726,31 @@ const checkoutPreview = async (req, res) => {
 
     const stores = [];
     for (const [storeId, lines] of groups.entries()) {
-      stores.push(await previewStore({ storeId, lines, pincode, paymentMethod }));
+      stores.push(
+        await previewStore({
+          userId,
+          storeId,
+          lines,
+          deliveryAddress,
+          paymentMethod,
+        }),
+      );
     }
 
-    const totalShipping = round2(
-      stores.filter((s) => s.ok).reduce((sum, s) => sum + s.shippingCharge, 0),
-    );
+    const okStores = stores.filter((s) => s.ok);
+    const sum = (key) =>
+      round2(okStores.reduce((total, s) => total + Number(s[key] || 0), 0));
 
     return res.status(200).json({
       success: true,
       paymentMethod,
-      totalShipping,
+      itemsTotal: sum("itemsTotal"),
+      totalShipping: sum("shippingCharge"),
+      grandTotal: sum("grandTotal"),
       // kono store e COD na thakle pura checkout e COD dekhano jabe na
       codAvailable: stores.every((s) => s.codAvailable),
+      // shob store e payment OFF hole payment step-i lagbe na
+      paymentRequired: stores.some((s) => s.onlineAvailable),
       stores,
     });
   } catch (error) {

@@ -5,9 +5,11 @@ const PincodeModel = require("../model/pincode.model.js");
 const { saveDeliverySettingsSchema } = require("../schema/delivery.schema.js");
 const {
   isValidPincode,
+  toMinutes,
   findPincodesInRadius,
   countPincodesInRadius,
   checkStoreDelivery,
+  finalizeShipping,
 } = require("../helper/deliveryEstimate.js");
 const {
   AVAILABLE_STORE_FILTER,
@@ -22,6 +24,7 @@ const { notifyUserOrderStatus } = require("../helper/notification.helper.js");
 const { getStorePolicy } = require("../helper/storePolicy.js");
 
 const getUserId = (req) => req.user?._id || req.user?.id;
+const round2 = (n) => Math.round((Number(n || 0) + Number.EPSILON) * 100) / 100;
 
 const handleError = (res, error, label) => {
   if (error.name === "ZodError") {
@@ -81,23 +84,78 @@ const saveDeliverySettings = async (req, res) => {
     const needsNational =
       data.deliveryType === "NATIONAL" || data.deliveryType === "BOTH";
 
+    // dispatch time (minute e)
+    const handlingUnit = data.handlingUnit || "DAYS";
+    const handlingValue = data.handlingValue ?? data.handlingDays ?? 1;
+    const handlingMinutes = toMinutes(handlingValue, handlingUnit);
+
+    // distance slab (choto theke boro, minute hishab shoho)
+    const localSlabs = needsLocal
+      ? [...(data.localSlabs || [])]
+          .sort((a, b) => a.upToKm - b.upToKm)
+          .map((s) => ({
+            upToKm: s.upToKm,
+            charge: round2(s.charge),
+            etaValue: s.etaValue,
+            etaUnit: s.etaUnit,
+            etaMinutes: toMinutes(s.etaValue, s.etaUnit),
+          }))
+      : [];
+
+    // order value rule (choto theke boro)
+    const chargeRules = [...(data.chargeRules || [])]
+      .sort((a, b) => a.minOrderValue - b.minOrderValue)
+      .map((r) => ({
+        minOrderValue: r.minOrderValue,
+        charge: round2(r.charge),
+      }));
+
+    const allowInternational =
+      needsNational && data.allowInternational === true;
+
     const update = {
       deliveryType: data.deliveryType,
       pincode: data.pincode,
       location: pin.location,
-      handlingDays: data.handlingDays ?? 1,
+
+      handlingValue,
+      handlingUnit,
+      handlingMinutes,
+      handlingDays: Math.ceil(handlingMinutes / 1440),
+
       radiusKm: needsLocal ? data.radiusKm : null,
-      localDeliveryDays: needsLocal ? data.localDeliveryDays : 1,
-      localDeliveryCharge: needsLocal ? (data.localDeliveryCharge ?? 0) : 0,
+      localSlabs,
+      // purono field gulo prothom slab er sathe mil rakhi
+      localDeliveryDays: needsLocal
+        ? localSlabs.length
+          ? Math.ceil(localSlabs[0].etaMinutes / 1440)
+          : (data.localDeliveryDays ?? 1)
+        : 1,
+      localDeliveryCharge: needsLocal
+        ? localSlabs.length
+          ? localSlabs[0].charge
+          : (data.localDeliveryCharge ?? 0)
+        : 0,
+
+      chargeRules,
+
       nationalFallbackCharge: needsNational
         ? (data.nationalFallbackCharge ?? 0)
         : 0,
-      isActive: true,
+
+      allowInternational,
       isActive: true,
     };
+
     if (needsNational) {
       update.nationalMinDays = data.nationalMinDays;
       update.nationalMaxDays = data.nationalMaxDays;
+    }
+
+    if (allowInternational) {
+      update.internationalMinDays = data.internationalMinDays ?? 7;
+      update.internationalMaxDays = data.internationalMaxDays ?? 14;
+      update.internationalFallbackCharge = data.internationalFallbackCharge ?? 0;
     }
 
     const settings = await StoreDeliveryModel.findOneAndUpdate(
@@ -204,22 +262,31 @@ const previewServicePincodes = async (req, res) => {
   }
 };
 
-// ===================== 4. PUBLIC: CHECK DELIVERY + DATE ESTIMATE =====================
-// GET /api/delivery/check?storeUniqueId=XXX&pincode=700001
 const checkDelivery = async (req, res) => {
   try {
     const storeUniqueId = String(req.query.storeUniqueId || "").trim();
     const pincode = String(req.query.pincode || "").trim();
+    const country = String(req.query.country || "India").trim() || "India";
+
+    let itemsTotal = null;
+    if (req.query.itemsTotal !== undefined && req.query.itemsTotal !== "") {
+      itemsTotal = Number(req.query.itemsTotal);
+      if (!Number.isFinite(itemsTotal) || itemsTotal < 0) {
+        return res
+          .status(400)
+          .json({ success: false, message: "Invalid itemsTotal" });
+      }
+    }
 
     if (!storeUniqueId) {
       return res
         .status(400)
         .json({ success: false, message: "storeUniqueId is required" });
     }
-    if (!isValidPincode(pincode)) {
+    if (!pincode) {
       return res
         .status(400)
-        .json({ success: false, message: "Enter a valid 6 digit pincode" });
+        .json({ success: false, message: "pincode is required" });
     }
 
     const store = await StoreModel.findOne({
@@ -234,18 +301,25 @@ const checkDelivery = async (req, res) => {
     const result = await checkStoreDelivery({
       storeId: store._id,
       pincode,
+      country,
       policy,
     });
+
+    const info =
+      result.deliverable && itemsTotal !== null
+        ? finalizeShipping(result, itemsTotal)
+        : result.info;
 
     return res.status(200).json({
       success: true,
       deliverable: result.deliverable,
       configured: result.configured,
       message: result.message || null,
-      delivery: result.info,
+      delivery: info,
       payment: {
+        paymentMode: policy.paymentMode,
         codAvailable: policy.codAllowed,
-        paymentFirst: policy.paymentFirst,
+        onlineAvailable: policy.onlineAllowed,
       },
     });
   } catch (error) {
@@ -295,6 +369,8 @@ const getMyPincode = async (req, res) => {
     return res.status(200).json({
       success: true,
       pincode: addr?.pincode || null,
+      country: addr?.country || "India",
+      state: addr?.state || null,
       address: addr
         ? {
             _id: addr._id,
@@ -303,6 +379,7 @@ const getMyPincode = async (req, res) => {
             city: addr.city,
             state: addr.state,
             pincode: addr.pincode,
+            country: addr.country,
           }
         : null,
     });
@@ -353,6 +430,15 @@ const createShiprocketShipment = async (req, res) => {
       });
     }
 
+    // international shipment e customs document lage, tai ekhono panel theke korte hobe
+    if (order.deliveryInfo?.mode === "INTERNATIONAL") {
+      return res.status(400).json({
+        success: false,
+        message:
+          "International shipments are not created automatically yet. Create it from the Shiprocket panel (customs documents are required)",
+      });
+    }
+
     if (order.deliveryInfo?.mode !== "NATIONAL") {
       return res.status(400).json({
         success: false,
@@ -382,20 +468,15 @@ const createShiprocketShipment = async (req, res) => {
 
     // ---------- Step A: Shiprocket e order create ----------
     if (!shipment?.shipmentId) {
-      const productIds = [
-        ...new Set(order.items.map((i) => String(i.productId))),
-      ];
+      const productIds = [...new Set(order.items.map((i) => String(i.productId)))];
 
-      const [store, customer, products, storeDelivery] = await Promise.all([
+      const [store, customer, products] = await Promise.all([
         StoreModel.findById(order.storeId).select("storeUniqueId").lean(),
         UserModel.findById(order.userId).select("email").lean(),
         ProductModel.find({ _id: { $in: productIds } })
           .select(
             "packagingDetails variants._id variants.packagingDetails variants.sizeVariants._id variants.sizeVariants.packagingDetails",
           )
-          .lean(),
-        StoreDeliveryModel.findOne({ storeId: order.storeId })
-          .select("pincode")
           .lean(),
       ]);
 
@@ -413,6 +494,11 @@ const createShiprocketShipment = async (req, res) => {
           quantity: item.quantity,
         })),
       );
+
+      // courier ke COD collect korte bolbo shudhu jodi app e COD hoy.
+      // paymentOff (store nijer sathe taka nei) hole Prepaid dhori, jeno courier taka na tole
+      const courierPaymentMethod =
+        order.paymentMethod === "COD" && !order.paymentOff ? "COD" : "Prepaid";
 
       const addr = order.deliveryAddress;
       const payload = {
@@ -440,7 +526,8 @@ const createShiprocketShipment = async (req, res) => {
           tax: "",
           hsn: "",
         })),
-        payment_method: order.paymentMethod === "COD" ? "COD" : "Prepaid",
+        payment_method: courierPaymentMethod,
+        // items er total + customer er dewa shipping charge alada (totalAmount e dutoi ache)
         sub_total:
           order.itemsTotal ??
           Math.max(0, order.totalAmount - (order.shippingCharge || 0)),

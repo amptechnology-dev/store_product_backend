@@ -115,19 +115,28 @@ const priceHistorySchema = new mongoose.Schema(
   { _id: false },
 );
 
+// order place er somoy store er delivery setting onujayi estimate + shipping charge
 const deliveryInfoSchema = new mongoose.Schema(
   {
-    mode: { type: String, enum: ["LOCAL", "NATIONAL"] },
+    mode: { type: String, enum: ["LOCAL", "NATIONAL", "INTERNATIONAL"] },
     distanceKm: { type: Number, default: null },
+    minMinutes: { type: Number },
+    maxMinutes: { type: Number },
     minDays: { type: Number },
     maxDays: { type: Number },
+    etaLabel: { type: String, default: null }, // "Delivery in 45 minutes"
     estimatedMinDate: { type: Date },
     estimatedMaxDate: { type: Date },
-    // [SHIPROCKET] estimate kothay theke ashche + courier er info
+    estimatedMaxAt: { type: Date },
     source: { type: String, enum: ["MANUAL", "SHIPROCKET"], default: "MANUAL" },
     courierId: { type: Number, default: null },
     courierName: { type: String, default: null },
-    shippingCharge: { type: Number, default: null },
+    courierRate: { type: Number, default: null }, // courier ke asol khoroch
+    shippingCharge: { type: Number, default: 0 }, // customer ke je charge
+    baseShippingCharge: { type: Number, default: null }, // order value rule er age
+    shippingNote: { type: String, default: null }, // "Within 5 km" / "Free delivery on orders of ₹500 or more"
+    country: { type: String, default: null },
+    pincode: { type: String, default: null },
   },
   { _id: false },
 );
@@ -219,6 +228,7 @@ const orderSchema = new mongoose.Schema(
     shippingCharge: { type: Number, default: 0, min: 0 },
     itemsTotal: { type: Number, default: null, min: 0 },
     deliveryEnabled: { type: Boolean, default: true },
+    paymentOff: { type: Boolean, default: false },
     shipment: { type: shipmentSchema, default: null },
     // ---------- payment ----------
     paymentMethod: { type: String, enum: PAYMENT_METHODS, default: "COD" },
