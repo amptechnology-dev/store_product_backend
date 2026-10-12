@@ -19,6 +19,7 @@ const OrderModel = require("../model/order.model.js");
 const ProductModel = require("../model/product.model.js");
 const shiprocket = require("../helper/shiprocket.js");
 const { notifyUserOrderStatus } = require("../helper/notification.helper.js");
+const { getStorePolicy } = require("../helper/storePolicy.js");
 
 const getUserId = (req) => req.user?._id || req.user?.id;
 
@@ -87,6 +88,11 @@ const saveDeliverySettings = async (req, res) => {
       handlingDays: data.handlingDays ?? 1,
       radiusKm: needsLocal ? data.radiusKm : null,
       localDeliveryDays: needsLocal ? data.localDeliveryDays : 1,
+      localDeliveryCharge: needsLocal ? (data.localDeliveryCharge ?? 0) : 0,
+      nationalFallbackCharge: needsNational
+        ? (data.nationalFallbackCharge ?? 0)
+        : 0,
+      isActive: true,
       isActive: true,
     };
     if (needsNational) {
@@ -224,7 +230,12 @@ const checkDelivery = async (req, res) => {
       .lean();
     if (!store) return sendStoreUnavailable(res);
 
-    const result = await checkStoreDelivery({ storeId: store._id, pincode });
+    const policy = await getStorePolicy(store._id);
+    const result = await checkStoreDelivery({
+      storeId: store._id,
+      pincode,
+      policy,
+    });
 
     return res.status(200).json({
       success: true,
@@ -232,6 +243,10 @@ const checkDelivery = async (req, res) => {
       configured: result.configured,
       message: result.message || null,
       delivery: result.info,
+      payment: {
+        codAvailable: policy.codAllowed,
+        paymentFirst: policy.paymentFirst,
+      },
     });
   } catch (error) {
     return handleError(res, error, "Check Delivery Error");
@@ -367,7 +382,9 @@ const createShiprocketShipment = async (req, res) => {
 
     // ---------- Step A: Shiprocket e order create ----------
     if (!shipment?.shipmentId) {
-      const productIds = [...new Set(order.items.map((i) => String(i.productId)))];
+      const productIds = [
+        ...new Set(order.items.map((i) => String(i.productId))),
+      ];
 
       const [store, customer, products, storeDelivery] = await Promise.all([
         StoreModel.findById(order.storeId).select("storeUniqueId").lean(),
@@ -424,7 +441,10 @@ const createShiprocketShipment = async (req, res) => {
           hsn: "",
         })),
         payment_method: order.paymentMethod === "COD" ? "COD" : "Prepaid",
-        sub_total: order.totalAmount,
+        sub_total:
+          order.itemsTotal ??
+          Math.max(0, order.totalAmount - (order.shippingCharge || 0)),
+        shipping_charges: order.shippingCharge || 0,
         length: parcel.length,
         breadth: parcel.breadth,
         height: parcel.height,

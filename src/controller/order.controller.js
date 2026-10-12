@@ -46,6 +46,10 @@ const { checkStoreDelivery } = require("../helper/deliveryEstimate.js");
 // [GST]
 const { getGstMode, applyGstToItem } = require("../helper/gst.js");
 const { calcWeightKg } = require("../helper/shiprocket.js");
+const {
+  getStorePolicy,
+  COD_NOT_ALLOWED_MESSAGE,
+} = require("../helper/storePolicy.js");
 
 // ===================== CONSTANTS / HELPERS =====================
 const ORDER_STATUSES = [
@@ -169,9 +173,18 @@ const rollbackLines = (lines) =>
   );
 
 // ===================== INTERNAL HELPER =====================
-// Ekta store er ekta set-of-lines er jonno: stock atomically decrement kore,
-// order banay. Kono ekta line fail korle ager shob decrement rollback hoy —
-// tai ekta store er order "all or nothing".
+
+const linesWeightKg = (lines, productMap) =>
+  calcWeightKg(
+    lines
+      .map((l) => ({
+        product: productMap.get(String(l.productId)),
+        variantId: cleanVariantId(l.variantId),
+        quantity: l.quantity,
+      }))
+      .filter((e) => e.product),
+  );
+
 const attemptStoreCheckout = async ({
   userId,
   storeId,
@@ -202,20 +215,18 @@ const attemptStoreCheckout = async ({
   });
   const productMap = new Map(products.map((p) => [String(p._id), p]));
 
-  const weightKg = calcWeightKg(
-    lines
-      .map((l) => ({
-        product: productMap.get(String(l.productId)),
-        variantId: cleanVariantId(l.variantId),
-        quantity: l.quantity,
-      }))
-      .filter((e) => e.product),
-  );
+  const policy = await getStorePolicy(storeId);
+  if (paymentMethod === "COD" && !policy.codAllowed) {
+    return { success: false, storeId, message: COD_NOT_ALLOWED_MESSAGE };
+  }
+
+  // [DELIVERY + SHIPPING] pincode check + shipping charge (delivery off hole kichui hobe na)
   const delivery = await checkStoreDelivery({
     storeId,
     pincode: deliveryAddress?.pincode,
-    weightKg,
+    weightKg: linesWeightKg(lines, productMap),
     cod: paymentMethod === "COD",
+    policy,
   });
   if (!delivery.deliverable) {
     return {
@@ -225,6 +236,7 @@ const attemptStoreCheckout = async ({
         delivery.message || "This store does not deliver to your pincode",
     };
   }
+  const shippingCharge = round2(delivery.info?.shippingCharge || 0);
 
   // [GST] store state != delivery state hole IGST, nahole CGST+SGST
   const gstMode = getGstMode(store.state, deliveryAddress?.state);
@@ -373,6 +385,9 @@ const attemptStoreCheckout = async ({
     ? "AWAITING_QUOTE"
     : "NOT_REQUIRED";
 
+  const itemsTotal = totalAmount;
+  const grandTotal = round2(itemsTotal + shippingCharge);
+
   // [PAYMENT] ONLINE + price already fixed hole 30 min er payment window.
   // Quote lagbe emon order e window shuru hoy user quote accept korle (respondToQuote),
   // nahole quote asar age-i order auto-cancel hoye jabe.
@@ -400,7 +415,10 @@ const attemptStoreCheckout = async ({
       totalSgst,
       totalIgst,
       totalGst,
-      totalAmount, // payable (GST soho)
+      itemsTotal,
+      shippingCharge,
+      deliveryEnabled: policy.hasDelivery,
+      totalAmount: grandTotal,
       priceStatus,
       deliveryAddress,
       deliveryInfo: delivery.info,
@@ -946,6 +964,9 @@ const respondToQuote = async (req, res) => {
       }
 
       const totals = computeTotals(items);
+      const grandTotal = round2(
+        totals.grandTotal + Number(existing.shippingCharge || 0),
+      );
       update = {
         $set: {
           items,
@@ -957,7 +978,7 @@ const respondToQuote = async (req, res) => {
           totalSgst: totals.totalSgst,
           totalIgst: totals.totalIgst,
           totalGst: totals.totalGst,
-          totalAmount: totals.totalAmount,
+          totalAmount: totals.grandTotal,
           priceStatus: "CONFIRMED",
           // [PAYMENT] ONLINE order e quote accept er por theke 30 min payment window shuru
           ...(existing.paymentMethod === "ONLINE"
@@ -969,7 +990,7 @@ const respondToQuote = async (req, res) => {
             action: "ACCEPTED",
             byRole: "USER",
             by: userId,
-            total: totals.totalAmount,
+            total: totals.grandTotal,
             at: now,
           },
         },
@@ -1141,8 +1162,6 @@ const getStoreOrderById = async (req, res) => {
   }
 };
 
-// ===================== 9. UPDATE ORDER STATUS (store side) =====================
-// PATCH /api/order/store-orders/:orderId/status   body: { status, note?, expectedDeliveryDate? }
 const updateOrderStatus = async (req, res) => {
   try {
     const { orderId } = req.params;
@@ -1159,7 +1178,7 @@ const updateOrderStatus = async (req, res) => {
 
     const existing = await OrderModel.findById(orderId)
       .select(
-        "storeId status expectedDeliveryDate priceStatus paymentMethod paymentStatus",
+        "storeId status expectedDeliveryDate priceStatus paymentMethod paymentStatus deliveryEnabled",
       )
       .lean();
     if (!existing) {
@@ -1182,6 +1201,15 @@ const updateOrderStatus = async (req, res) => {
           ALLOWED_TRANSITIONS[existing.status].length === 0
             ? `Order status cannot be changed once it is ${existing.status}`
             : `Cannot change status from ${existing.status} to ${status}`,
+      });
+    }
+
+    // [PAYMENT] payment complete hole order cancel kora jabe na
+    if (status === "CANCELLED" && existing.paymentStatus === "PAID") {
+      return res.status(400).json({
+        success: false,
+        message:
+          "Payment has been completed, so this order can no longer be cancelled",
       });
     }
 
@@ -1222,8 +1250,12 @@ const updateOrderStatus = async (req, res) => {
       }
     }
     if (status === "SHIPPED") {
-      // shipped korar age delivery date lagbe (notun pathale seta, nahole age thekei thakte hobe)
-      if (!expectedDeliveryDate && !existing.expectedDeliveryDate) {
+      // [DELIVERY] delivery off store e date lagbe na. Baki store e shipped korar age date lagbe
+      if (
+        existing.deliveryEnabled !== false &&
+        !expectedDeliveryDate &&
+        !existing.expectedDeliveryDate
+      ) {
         return res.status(400).json({
           success: false,
           message: "Expected delivery date is required before shipping",
@@ -1249,6 +1281,10 @@ const updateOrderStatus = async (req, res) => {
       if (existing.paymentMethod === "ONLINE") {
         filter.paymentStatus = "PAID";
       }
+    }
+    if (status === "CANCELLED") {
+      // [PAYMENT] race guard: ei majhe payment PAID hoye gele cancel hobe na
+      filter = { paymentStatus: { $ne: "PAID" } };
     }
 
     const order = await transitionOrder({
@@ -1365,7 +1401,7 @@ const submitQuote = async (req, res) => {
     const { items: quoteItems, note } = submitQuoteSchema.parse(req.body);
 
     const existing = await OrderModel.findById(orderId)
-      .select("storeId status priceStatus items gstMode") // [GST] gstMode
+      .select("storeId status priceStatus items gstMode shippingCharge")
       .lean();
     if (!existing) {
       return res
@@ -1424,7 +1460,10 @@ const submitQuote = async (req, res) => {
         existing.gstMode,
       );
     });
-    const total = computeTotals(simulated).totalAmount;
+    const total = round2(
+      computeTotals(simulated).totalAmount +
+        Number(existing.shippingCharge || 0),
+    );
 
     const quotedAt = new Date();
 
@@ -1484,6 +1523,192 @@ const submitQuote = async (req, res) => {
   }
 };
 
+const PREVIEW_PRODUCT_FIELDS =
+  "storeId packagingDetails variants._id variants.packagingDetails variants.sizeVariants._id variants.sizeVariants.packagingDetails";
+
+const previewStore = async ({ storeId, lines, pincode, paymentMethod }) => {
+  const store = await StoreModel.findOne({
+    _id: storeId,
+    ...AVAILABLE_STORE_FILTER,
+  })
+    .select("storeName storeUniqueId")
+    .lean();
+
+  if (!store) {
+    return {
+      storeId,
+      ok: false,
+      code: "STORE_UNAVAILABLE",
+      message: "This store is not present in this application",
+      shippingCharge: 0,
+      delivery: null,
+      codAvailable: false,
+      paymentFirst: false,
+      deliveryEnabled: false,
+    };
+  }
+
+  const policy = await getStorePolicy(storeId);
+  const base = {
+    storeId,
+    storeName: store.storeName,
+    storeUniqueId: store.storeUniqueId,
+    codAvailable: policy.codAllowed,
+    paymentFirst: policy.paymentFirst,
+    deliveryEnabled: policy.hasDelivery,
+  };
+
+  if (paymentMethod === "COD" && !policy.codAllowed) {
+    return {
+      ...base,
+      ok: false,
+      code: "COD_NOT_ALLOWED",
+      message: COD_NOT_ALLOWED_MESSAGE,
+      shippingCharge: 0,
+      delivery: null,
+    };
+  }
+
+  const productIds = [...new Set(lines.map((l) => String(l.productId)))];
+  const products = await ProductModel.find({
+    _id: { $in: productIds },
+    isActive: true,
+    isVerified: true,
+  })
+    .select(PREVIEW_PRODUCT_FIELDS)
+    .lean();
+  const productMap = new Map(products.map((p) => [String(p._id), p]));
+
+  const delivery = await checkStoreDelivery({
+    storeId,
+    pincode,
+    weightKg: linesWeightKg(lines, productMap),
+    cod: paymentMethod === "COD",
+    policy,
+  });
+
+  if (!delivery.deliverable) {
+    return {
+      ...base,
+      ok: false,
+      code: "NOT_DELIVERABLE",
+      message: delivery.message,
+      shippingCharge: 0,
+      delivery: null,
+    };
+  }
+
+  return {
+    ...base,
+    ok: true,
+    shippingCharge: round2(delivery.info?.shippingCharge || 0),
+    delivery: delivery.info,
+  };
+};
+
+const checkoutPreview = async (req, res) => {
+  try {
+    const userId = getUserId(req);
+    const { cartId, storeIds, productId, variantId, quantity } = req.body || {};
+    const pincode = String(req.body?.pincode || "").trim();
+    const paymentMethod = req.body?.paymentMethod === "COD" ? "COD" : "ONLINE";
+
+    if (!/^[1-9][0-9]{5}$/.test(pincode)) {
+      return res
+        .status(400)
+        .json({ success: false, message: "Enter a valid 6 digit pincode" });
+    }
+
+    // ---------- store wise lines (checkout / buyNow er moto) ----------
+    const groups = new Map();
+
+    if (cartId) {
+      if (!mongoose.isValidObjectId(cartId)) {
+        return res
+          .status(400)
+          .json({ success: false, message: "Invalid cart id" });
+      }
+      const cart = await CartModel.findOne({ _id: cartId, userId });
+      if (!cart) {
+        return res
+          .status(404)
+          .json({ success: false, message: "Cart not found" });
+      }
+
+      let items = cart.items;
+      if (Array.isArray(storeIds) && storeIds.length > 0) {
+        const set = new Set(storeIds.map(String));
+        items = items.filter((i) => set.has(String(i.storeId)));
+      }
+      for (const item of items) {
+        const key = String(item.storeId);
+        if (!groups.has(key)) groups.set(key, []);
+        groups.get(key).push({
+          productId: item.productId,
+          variantId: item.variantId,
+          quantity: item.quantity,
+        });
+      }
+    } else if (productId) {
+      if (!mongoose.isValidObjectId(productId)) {
+        return res
+          .status(400)
+          .json({ success: false, message: "Invalid product id" });
+      }
+      const product = await ProductModel.findOne({
+        _id: productId,
+        isActive: true,
+        isVerified: true,
+      })
+        .select("storeId")
+        .lean();
+      if (!product) {
+        return res
+          .status(404)
+          .json({ success: false, message: "Product not available" });
+      }
+      groups.set(String(product.storeId), [
+        {
+          productId,
+          variantId: cleanVariantId(variantId),
+          quantity: Math.max(1, Number(quantity) || 1),
+        },
+      ]);
+    } else {
+      return res.status(400).json({
+        success: false,
+        message: "cartId or productId is required",
+      });
+    }
+
+    if (groups.size === 0) {
+      return res
+        .status(400)
+        .json({ success: false, message: "No items to checkout" });
+    }
+
+    const stores = [];
+    for (const [storeId, lines] of groups.entries()) {
+      stores.push(await previewStore({ storeId, lines, pincode, paymentMethod }));
+    }
+
+    const totalShipping = round2(
+      stores.filter((s) => s.ok).reduce((sum, s) => sum + s.shippingCharge, 0),
+    );
+
+    return res.status(200).json({
+      success: true,
+      paymentMethod,
+      totalShipping,
+      // kono store e COD na thakle pura checkout e COD dekhano jabe na
+      codAvailable: stores.every((s) => s.codAvailable),
+      stores,
+    });
+  } catch (error) {
+    return handleError(res, error, "Checkout Preview Error");
+  }
+};
+
 module.exports = {
   checkout,
   buyNow,
@@ -1499,4 +1724,5 @@ module.exports = {
   updateDeliveryDate,
   submitQuote,
   restoreOrderStock,
+  checkoutPreview,
 };

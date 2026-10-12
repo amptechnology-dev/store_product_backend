@@ -9,11 +9,26 @@ const { PayoutModel, PAYOUT_METHODS } = require("../model/payout.model.js");
 const MAX_LIMIT = 100;
 const EPS = 0.005;
 
+const STORE_SHARE = {
+  $subtract: [
+    "$totalAmount",
+    {
+      $cond: [
+        { $eq: ["$deliveryInfo.source", "SHIPROCKET"] },
+        { $ifNull: ["$shippingCharge", 0] },
+        0,
+      ],
+    },
+  ],
+};
+
 const getUserId = (req) => req.user?._id || req.user?.id;
 const round2 = (n) => Math.round((Number(n || 0) + Number.EPSILON) * 100) / 100;
 const escapeRegex = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 const sendError = (res, code, message, errors) =>
-  res.status(code).json({ success: false, message, ...(errors ? { errors } : {}) });
+  res
+    .status(code)
+    .json({ success: false, message, ...(errors ? { errors } : {}) });
 
 const handleError = (res, error, label) => {
   if (error.name === "ZodError") {
@@ -81,7 +96,7 @@ const fetchTotalRows = async (storeIds) => {
           _id: "$storeId",
           received: {
             $sum: {
-              $cond: [{ $ne: ["$status", "CANCELLED"] }, "$totalAmount", 0],
+              $cond: [{ $ne: ["$status", "CANCELLED"] }, STORE_SHARE, 0],
             },
           },
           held: {
@@ -173,9 +188,7 @@ const formatPayout = (p, { withAdmin = false } = {}) => {
     isVoided: p.isVoided,
     voidReason: p.isVoided ? p.voidReason : null,
     voidedAt: p.isVoided ? p.voidedAt : null,
-    ...(withAdmin
-      ? { paidByName: p.paidBy?.name || null }
-      : {}),
+    ...(withAdmin ? { paidByName: p.paidBy?.name || null } : {}),
     createdAt: p.createdAt,
   };
 };
@@ -252,11 +265,7 @@ const getPayoutStores = async (req, res) => {
                 _id: null,
                 received: {
                   $sum: {
-                    $cond: [
-                      { $ne: ["$status", "CANCELLED"] },
-                      "$totalAmount",
-                      0,
-                    ],
+                    $cond: [{ $ne: ["$status", "CANCELLED"] }, STORE_SHARE, 0],
                   },
                 },
                 held: {
@@ -377,7 +386,10 @@ const getPayoutStores = async (req, res) => {
       limit: limitNum,
       totalStores,
       totalPages: Math.ceil(totalStores / limitNum),
-      summary: { ...buildSummary(overall, overall), pendingStores: overall.pendingStores || 0 },
+      summary: {
+        ...buildSummary(overall, overall),
+        pendingStores: overall.pendingStores || 0,
+      },
       stores,
     });
   } catch (error) {

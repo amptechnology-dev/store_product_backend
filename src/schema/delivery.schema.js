@@ -15,6 +15,9 @@ const saveDeliverySettingsSchema = z
     nationalMinDays: z.coerce.number().int().min(0).max(60).optional(),
     nationalMaxDays: z.coerce.number().int().min(0).max(60).optional(),
     handlingDays: z.coerce.number().int().min(0).max(30).optional(),
+    // [SHIPPING]
+    localDeliveryCharge: z.coerce.number().min(0).max(100000).optional(),
+    nationalFallbackCharge: z.coerce.number().min(0).max(100000).optional(),
   })
   .superRefine((d, ctx) => {
     const needsLocal = d.deliveryType === "LOCAL" || d.deliveryType === "BOTH";

@@ -203,7 +203,7 @@ const orderSchema = new mongoose.Schema(
     totalItems: { type: Number, required: true, min: 1 },
     totalMrp: { type: Number, required: true, min: 0 },
     discount: { type: Number, required: true, min: 0 },
-     gstMode: { type: String, enum: ["INTRA", "INTER"], default: "INTRA" },
+    gstMode: { type: String, enum: ["INTRA", "INTER"], default: "INTRA" },
     subtotal: { type: Number, default: 0, min: 0 }, // GST er age item total
     totalTaxable: { type: Number, default: 0, min: 0 },
     totalCgst: { type: Number, default: 0, min: 0 },
@@ -216,6 +216,9 @@ const orderSchema = new mongoose.Schema(
     note: { type: String, default: null },
     expectedDeliveryDate: { type: Date, default: null },
     deliveryInfo: { type: deliveryInfoSchema, default: null },
+    shippingCharge: { type: Number, default: 0, min: 0 },
+    itemsTotal: { type: Number, default: null, min: 0 },
+    deliveryEnabled: { type: Boolean, default: true },
     shipment: { type: shipmentSchema, default: null },
     // ---------- payment ----------
     paymentMethod: { type: String, enum: PAYMENT_METHODS, default: "COD" },

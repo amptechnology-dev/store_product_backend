@@ -1,6 +1,7 @@
 const StoreDeliveryModel = require("../model/storeDelivery.model.js");
 const PincodeModel = require("../model/pincode.model.js");
 const shiprocket = require("./shiprocket.js");
+const { getStorePolicy } = require("./storePolicy.js");
 
 const EARTH_RADIUS_KM = 6378.1;
 const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
@@ -9,6 +10,7 @@ const isValidPincode = (p) => /^[1-9][0-9]{5}$/.test(String(p || "").trim());
 
 const toRad = (d) => (d * Math.PI) / 180;
 const round1 = (n) => Math.round(n * 10) / 10;
+const round2 = (n) => Math.round((Number(n || 0) + Number.EPSILON) * 100) / 100;
 
 // coordinates = [lng, lat]
 const haversineKm = ([lng1, lat1], [lng2, lat2]) => {
@@ -29,6 +31,7 @@ const addDaysFromToday = (days) => {
 };
 
 // source: MANUAL = store er nijer days, SHIPROCKET = courier er asol ETA / rate
+// shippingCharge: customer er order total e jog hoy
 const buildInfo = (mode, distanceKm, minDays, maxDays, extra = {}) => ({
   mode,
   distanceKm,
@@ -39,7 +42,7 @@ const buildInfo = (mode, distanceKm, minDays, maxDays, extra = {}) => ({
   source: "MANUAL",
   courierId: null,
   courierName: null,
-  shippingCharge: null,
+  shippingCharge: 0,
   ...extra,
 });
 
@@ -62,7 +65,7 @@ const countPincodesInRadius = ({ coordinates, radiusKm }) =>
     },
   });
 
-// NATIONAL: Shiprocket thakle courier er asol ETA, nahole store er manual days
+// NATIONAL: Shiprocket thakle courier er asol ETA + rate, nahole store er manual days + fallback charge
 const resolveNational = async ({ cfg, pin, handling, weightKg, cod }) => {
   if (shiprocket.isAvailable()) {
     try {
@@ -85,7 +88,7 @@ const resolveNational = async ({ cfg, pin, handling, weightKg, cod }) => {
           source: "SHIPROCKET",
           courierId: svc.cheapest.id,
           courierName: svc.cheapest.name,
-          shippingCharge: svc.cheapest.rate,
+          shippingCharge: round2(svc.cheapest.rate),
         }),
       };
     } catch (err) {
@@ -104,22 +107,32 @@ const resolveNational = async ({ cfg, pin, handling, weightKg, cod }) => {
       null,
       handling + (cfg.nationalMinDays || 0),
       handling + (cfg.nationalMaxDays || 0),
+      { shippingCharge: round2(cfg.nationalFallbackCharge) },
     ),
   };
 };
 
 /**
- * Ekta store ei user pincode e deliver kore kina + date estimate.
+ * Ekta store ei user pincode e deliver kore kina + date estimate + shipping charge.
  * Return: { deliverable, configured, message?, info }
- *  - configured=false : store e delivery setting nei -> kono restriction/estimate nei (purono store)
+ *  - configured=false : store e delivery off ba setting nei -> kono restriction / estimate / charge nei
  *  - weightKg / cod : shudhu NATIONAL (courier) hishabe lage. Listing e na dile default weight, prepaid
+ *  - policy : getStorePolicy er result (dile abar DB query hoy na)
  */
 const checkStoreDelivery = async ({
   storeId,
   pincode,
   weightKg,
   cod = false,
+  policy,
 }) => {
+  const pol = policy || (await getStorePolicy(storeId));
+
+  // [SETTINGS] store delivery off korle estimate / charge / pincode restriction kichui nei
+  if (!pol.hasDelivery) {
+    return { deliverable: true, configured: false, disabled: true, info: null };
+  }
+
   const cfg = await StoreDeliveryModel.findOne({
     storeId,
     isActive: true,
@@ -164,7 +177,9 @@ const checkStoreDelivery = async ({
       return {
         deliverable: true,
         configured: true,
-        info: buildInfo("LOCAL", distanceKm, days, days),
+        info: buildInfo("LOCAL", distanceKm, days, days, {
+          shippingCharge: round2(cfg.localDeliveryCharge),
+        }),
       };
     }
   }
@@ -210,14 +225,17 @@ const formatDeliveryLabel = (minDays, maxDays) => {
 
 /**
  * Product listing / detail e dekhanor jonno chhoto summary.
- * - pincode nei ba store e delivery setting nei -> null
+ * - pincode nei, store e delivery off, ba setting nei -> null
  * - deliverable na -> { deliverable: false, label: "..." }
  */
 const getDeliverySummary = async ({ storeId, pincode }) => {
   const pin = String(pincode || "").trim();
   if (!pin) return null;
 
-  const result = await checkStoreDelivery({ storeId, pincode: pin });
+  const policy = await getStorePolicy(storeId);
+  if (!policy.hasDelivery) return null;
+
+  const result = await checkStoreDelivery({ storeId, pincode: pin, policy });
   if (!result.configured) return null;
 
   if (!result.deliverable) {
@@ -254,7 +272,7 @@ const getDeliverySummary = async ({ storeId, pincode }) => {
     maxDays,
     estimatedMinDate,
     estimatedMaxDate,
-    shippingCharge: shippingCharge ?? null,
+    shippingCharge: shippingCharge ?? 0,
     courierName: courierName ?? null,
     label: formatDeliveryLabel(minDays, maxDays),
   };

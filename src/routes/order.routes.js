@@ -16,6 +16,7 @@ const {
   updateOrderStatus,
   updateDeliveryDate,
   submitQuote,
+  checkoutPreview
 } = require("../controller/order.controller.js");
 
 // ---------- USER ----------
@@ -41,6 +42,12 @@ router.patch(
   verifyJwt,
   authorize("USER"),
   respondToQuote,
+);
+router.post(
+  "/checkout-preview",
+  verifyJwt,
+  authorize("USER"),
+  checkoutPreview,
 );
 
 // ---------- STORE ----------

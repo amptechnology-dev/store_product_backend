@@ -31,6 +31,12 @@ const storeDeliverySchema = new mongoose.Schema(
     // order pack / dispatch korte lagbe koydin (LOCAL + NATIONAL duto-te jog hobe)
     handlingDays: { type: Number, default: 1, min: 0 },
 
+    // ---------- SHIPPING CHARGE (order total e jog hoy) ----------
+    // LOCAL: store er nijer flat charge (0 = free)
+    localDeliveryCharge: { type: Number, default: 0, min: 0 },
+    // NATIONAL: Shiprocket rate na pele (off / down) ei flat charge
+    nationalFallbackCharge: { type: Number, default: 0, min: 0 },
+
     isActive: { type: Boolean, default: true },
   },
   { timestamps: true },

@@ -8,6 +8,15 @@ const resolveStore = async (userId, storeId) => {
   return StoreModel.findOne({ userId });
 };
 
+// setting doc na thakle ba purono doc e notun field na thakle default
+const toPayload = (settings) => ({
+  hasStockManagement: settings
+    ? settings.hasStockManagement === true
+    : DEFAULT_SETTINGS.hasStockManagement,
+  hasDelivery: settings ? settings.hasDelivery !== false : true,
+  paymentFirst: settings ? settings.paymentFirst === true : false,
+});
+
 const getStoreSettingsController = async (req, res) => {
   try {
     const userId = req.user?._id || req.user?.id;
@@ -21,12 +30,7 @@ const getStoreSettingsController = async (req, res) => {
     return res.status(200).json({
       success: true,
       storeId: store._id,
-      // [STOCK] shudhu hasStockManagement ferot dey
-      settings: {
-        hasStockManagement: settings
-          ? settings.hasStockManagement
-          : DEFAULT_SETTINGS.hasStockManagement,
-      },
+      settings: toPayload(settings),
     });
   } catch (error) {
     console.error("Get Store Settings Error:", error);
@@ -37,14 +41,18 @@ const getStoreSettingsController = async (req, res) => {
 const updateStoreSettingsController = async (req, res) => {
   try {
     const userId = req.user?._id || req.user?.id;
+
+    // age validate, tarpor DB hit (invalid request e unnecessary query hobe na)
+    const parsed = updateStoreSettingSchema.parse(req.body);
+
     const storeId = req.body.storeId || req.query.storeId;
     const store = await resolveStore(userId, storeId);
     if (!store) {
       return res.status(404).json({ success: false, message: "Store not found" });
     }
 
-    const parsed = updateStoreSettingSchema.parse(req.body);
-
+    // parsed e shudhu je field gulo pathano hoyeche shegulo thakbe,
+    // tai onno setting gulo overwrite hobe na
     const settings = await StoreSettingModel.findOneAndUpdate(
       { storeId: store._id },
       { $set: parsed },
@@ -54,7 +62,7 @@ const updateStoreSettingsController = async (req, res) => {
     return res.status(200).json({
       success: true,
       message: "Store settings updated successfully",
-      settings: { hasStockManagement: settings.hasStockManagement },
+      settings: toPayload(settings),
     });
   } catch (error) {
     if (error.name === "ZodError") {

@@ -10,6 +10,8 @@ const storeSettingSchema = new mongoose.Schema(
       unique: true,
     },
     hasStockManagement: { type: Boolean, default: false },
+    hasDelivery: { type: Boolean, default: true },
+    paymentFirst: { type: Boolean, default: false },
   },
   { timestamps: true },
 );
