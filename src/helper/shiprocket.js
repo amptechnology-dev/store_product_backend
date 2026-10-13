@@ -395,6 +395,14 @@ const checkInternationalServiceability = async ({
 const createAdhocOrder = (payload) =>
   request("POST", "/orders/create/adhoc", { body: payload });
 
+const listPickupLocations = async () => {
+  const data = await request("GET", "/settings/company/pickup");
+  return data?.data?.shipping_address || [];
+};
+
+const addPickupLocation = (payload) =>
+  request("POST", "/settings/company/addpickup", { body: payload });
+
 const assignAwb = ({ shipmentId, courierId }) =>
   request("POST", "/courier/assign/awb", {
     body: {
@@ -542,6 +550,8 @@ module.exports = {
   createAdhocOrder,
   assignAwb,
   generatePickup,
+  listPickupLocations,  
+  addPickupLocation,     
   calcWeightKg,
   buildParcel,
 };

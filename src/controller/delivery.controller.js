@@ -12,6 +12,10 @@ const {
   finalizeShipping,
 } = require("../helper/deliveryEstimate.js");
 const {
+  ensurePickupLocation,
+  PickupSetupError,
+} = require("../helper/pickupLocation.js");
+const {
   AVAILABLE_STORE_FILTER,
   sendStoreUnavailable,
 } = require("../helper/storeAvailability.js");
@@ -162,7 +166,8 @@ const saveDeliverySettings = async (req, res) => {
     if (allowInternational) {
       update.internationalMinDays = data.internationalMinDays ?? 7;
       update.internationalMaxDays = data.internationalMaxDays ?? 14;
-      update.internationalFallbackCharge = data.internationalFallbackCharge ?? 0;
+      update.internationalFallbackCharge =
+        data.internationalFallbackCharge ?? 0;
     }
 
     const settings = await StoreDeliveryModel.findOneAndUpdate(
@@ -274,7 +279,9 @@ const checkDelivery = async (req, res) => {
     const storeUniqueId = String(req.query.storeUniqueId || "").trim();
     const pincode = String(req.query.pincode || "").trim();
     const country = String(req.query.country || "India").trim() || "India";
-    const cod = ["1", "true"].includes(String(req.query.cod || "").toLowerCase());
+    const cod = ["1", "true"].includes(
+      String(req.query.cod || "").toLowerCase(),
+    );
 
     let itemsTotal = null;
     if (req.query.itemsTotal !== undefined && req.query.itemsTotal !== "") {
@@ -516,13 +523,14 @@ const createShiprocketShipment = async (req, res) => {
 
     // ---------- Step A: Shiprocket e order create ----------
     if (!shipment?.shipmentId) {
-      // order place er somoy ja dhora hoyechilo (customer ke ja charge kora hoyeche) seta-i use hobe
       let parcel = order.parcel?.weight ? order.parcel : null;
 
-      const productIds = [...new Set(order.items.map((i) => String(i.productId)))];
+      const productIds = [
+        ...new Set(order.items.map((i) => String(i.productId))),
+      ];
 
-      const [store, customer, products] = await Promise.all([
-        StoreModel.findById(order.storeId).select("storeUniqueId").lean(),
+      const [owner, customer, products] = await Promise.all([
+        UserModel.findById(userId).select("name email").lean(),
         UserModel.findById(order.userId).select("email").lean(),
         parcel
           ? Promise.resolve([])
@@ -533,11 +541,12 @@ const createShiprocketShipment = async (req, res) => {
               .lean(),
       ]);
 
-      if (!store?.storeUniqueId) {
-        return res
-          .status(400)
-          .json({ success: false, message: "Store unique id not found" });
-      }
+      // [PICKUP] store er nijer pickup address (Shiprocket e na thakle auto-create hoy)
+      const pickupLocation = await ensurePickupLocation({
+        storeId: order.storeId,
+        ownerName: owner?.name,
+        ownerEmail: owner?.email,
+      });
 
       if (!parcel) {
         // purono order (parcel snapshot nei): ekhon product theke hishab
@@ -561,7 +570,7 @@ const createShiprocketShipment = async (req, res) => {
       const payload = {
         order_id: order.orderNumber,
         order_date: fmtOrderDate(order.createdAt),
-        pickup_location: store.storeUniqueId,
+        pickup_location: pickupLocation,
         billing_customer_name: addr.fullName,
         billing_last_name: "",
         billing_address: addr.addressLine,
@@ -613,7 +622,6 @@ const createShiprocketShipment = async (req, res) => {
         pickupRequestedAt: null,
         pickupScheduledDate: null,
         pickupTokenNumber: null,
-        // courier er ETD ashar age customer ke dekhano estimate-i dhori
         etd: order.deliveryInfo?.estimatedMaxDate ?? null,
         etdSource: "ESTIMATE",
         appliedWeight: null,
@@ -629,7 +637,11 @@ const createShiprocketShipment = async (req, res) => {
     if (!shipment.awb) {
       const extract = (r) => {
         const d = r?.response?.data || {};
-        return { awb: d.awb_code || r?.awb_code, data: d, message: d.message || r?.message };
+        return {
+          awb: d.awb_code || r?.awb_code,
+          data: d,
+          message: d.message || r?.message,
+        };
       };
 
       let awbRes = await shiprocket
@@ -637,13 +649,19 @@ const createShiprocketShipment = async (req, res) => {
           shipmentId: shipment.shipmentId,
           courierId: shipment.courierId,
         })
-        .catch(() => null);
+        .catch((err) => {
+          // error লুকিয়ে না ফেলে log করো, debug সহজ হবে
+          console.error("AWB assign (quoted courier) failed:", err.message);
+          return null;
+        });
       let ex = extract(awbRes);
       let switched = false;
 
       // quoted courier ekhon available na hole Shiprocket ke nije courier thik korte dai
       if (!ex.awb && shipment.courierId) {
-        awbRes = await shiprocket.assignAwb({ shipmentId: shipment.shipmentId });
+        awbRes = await shiprocket.assignAwb({
+          shipmentId: shipment.shipmentId,
+        });
         ex = extract(awbRes);
         switched = true;
       }
@@ -665,7 +683,8 @@ const createShiprocketShipment = async (req, res) => {
         appliedWeight: Number(ex.data.applied_weight) || null,
         assignedAt: parseDate(ex.data.assigned_date_time) || new Date(),
         pickupScheduledDate:
-          parseDate(ex.data.pickup_scheduled_date) || shipment.pickupScheduledDate,
+          parseDate(ex.data.pickup_scheduled_date) ||
+          shipment.pickupScheduledDate,
         courierSwitched: switched,
         status: "AWB_ASSIGNED",
       };
@@ -684,7 +703,9 @@ const createShiprocketShipment = async (req, res) => {
           pickupScheduledDate:
             parseDate(p.pickup_scheduled_date) || shipment.pickupScheduledDate,
           pickupTokenNumber:
-            p.pickup_token_number != null ? String(p.pickup_token_number) : null,
+            p.pickup_token_number != null
+              ? String(p.pickup_token_number)
+              : null,
           status: "PICKUP_SCHEDULED",
         };
       } catch (err) {
@@ -716,6 +737,9 @@ const createShiprocketShipment = async (req, res) => {
       order: updated,
     });
   } catch (error) {
+    if (error.name === "PickupSetupError") {
+      return res.status(400).json({ success: false, message: error.message });
+    }
     if (error.name === "ShiprocketError") {
       console.error("Create Shiprocket Shipment Error:", error.message);
       return res.status(502).json({
@@ -764,7 +788,8 @@ const courierWebhook = async (req, res) => {
       "shipment.lastEventAt": parseDate(body.current_timestamp) || new Date(),
     };
 
-    if (body.courier_name) set["shipment.courierName"] = String(body.courier_name);
+    if (body.courier_name)
+      set["shipment.courierName"] = String(body.courier_name);
 
     // courier er nijer ETD (customer ke dekhano estimate er cheye nirbhorjogyo)
     const etd = parseDate(body.etd);
