@@ -23,6 +23,13 @@ const shiprocket = require("../helper/shiprocket.js");
 const { notifyUserOrderStatus } = require("../helper/notification.helper.js");
 const { getStorePolicy } = require("../helper/storePolicy.js");
 
+const parseDate = (v) => {
+  if (!v) return null;
+  const raw = typeof v === "object" && v.date ? v.date : v; // Shiprocket kokhono {date, timezone} dey
+  const d = new Date(raw);
+  return Number.isNaN(d.getTime()) ? null : d;
+};
+
 const getUserId = (req) => req.user?._id || req.user?.id;
 const round2 = (n) => Math.round((Number(n || 0) + Number.EPSILON) * 100) / 100;
 
@@ -267,6 +274,7 @@ const checkDelivery = async (req, res) => {
     const storeUniqueId = String(req.query.storeUniqueId || "").trim();
     const pincode = String(req.query.pincode || "").trim();
     const country = String(req.query.country || "India").trim() || "India";
+    const cod = ["1", "true"].includes(String(req.query.cod || "").toLowerCase());
 
     let itemsTotal = null;
     if (req.query.itemsTotal !== undefined && req.query.itemsTotal !== "") {
@@ -297,11 +305,43 @@ const checkDelivery = async (req, res) => {
       .lean();
     if (!store) return sendStoreUnavailable(res);
 
+    // product dile oi product er packaging theke weight + size
+    let parcel = null;
+    const { productId } = req.query;
+    if (productId && mongoose.isValidObjectId(productId)) {
+      const product = await ProductModel.findOne({
+        _id: productId,
+        storeId: store._id,
+        isActive: true,
+      })
+        .select(
+          "name packagingDetails variants._id variants.packagingDetails variants.sizeVariants._id variants.sizeVariants.packagingDetails",
+        )
+        .lean();
+
+      if (product) {
+        const rawVariant = String(req.query.variantId || "").trim();
+        const variantId =
+          !rawVariant || rawVariant === "null" || rawVariant === "undefined"
+            ? null
+            : rawVariant;
+        parcel = shiprocket.buildParcel([
+          {
+            product,
+            variantId,
+            quantity: Math.max(1, parseInt(req.query.quantity, 10) || 1),
+          },
+        ]);
+      }
+    }
+
     const policy = await getStorePolicy(store._id);
     const result = await checkStoreDelivery({
       storeId: store._id,
       pincode,
       country,
+      parcel,
+      cod,
       policy,
     });
 
@@ -316,6 +356,15 @@ const checkDelivery = async (req, res) => {
       configured: result.configured,
       message: result.message || null,
       delivery: info,
+      parcel: parcel
+        ? {
+            weight: parcel.weight,
+            volumetricWeight: parcel.volumetricWeight,
+            chargeableWeight: parcel.chargeableWeight,
+            dimsComplete: parcel.dimsComplete,
+            weightComplete: parcel.weightComplete,
+          }
+        : null,
       payment: {
         paymentMode: policy.paymentMode,
         codAvailable: policy.codAllowed,
@@ -430,7 +479,6 @@ const createShiprocketShipment = async (req, res) => {
       });
     }
 
-    // international shipment e customs document lage, tai ekhono panel theke korte hobe
     if (order.deliveryInfo?.mode === "INTERNATIONAL") {
       return res.status(400).json({
         success: false,
@@ -468,16 +516,21 @@ const createShiprocketShipment = async (req, res) => {
 
     // ---------- Step A: Shiprocket e order create ----------
     if (!shipment?.shipmentId) {
+      // order place er somoy ja dhora hoyechilo (customer ke ja charge kora hoyeche) seta-i use hobe
+      let parcel = order.parcel?.weight ? order.parcel : null;
+
       const productIds = [...new Set(order.items.map((i) => String(i.productId)))];
 
       const [store, customer, products] = await Promise.all([
         StoreModel.findById(order.storeId).select("storeUniqueId").lean(),
         UserModel.findById(order.userId).select("email").lean(),
-        ProductModel.find({ _id: { $in: productIds } })
-          .select(
-            "packagingDetails variants._id variants.packagingDetails variants.sizeVariants._id variants.sizeVariants.packagingDetails",
-          )
-          .lean(),
+        parcel
+          ? Promise.resolve([])
+          : ProductModel.find({ _id: { $in: productIds } })
+              .select(
+                "name packagingDetails variants._id variants.packagingDetails variants.sizeVariants._id variants.sizeVariants.packagingDetails",
+              )
+              .lean(),
       ]);
 
       if (!store?.storeUniqueId) {
@@ -486,17 +539,21 @@ const createShiprocketShipment = async (req, res) => {
           .json({ success: false, message: "Store unique id not found" });
       }
 
-      const productMap = new Map(products.map((p) => [String(p._id), p]));
-      const parcel = shiprocket.buildParcel(
-        order.items.map((item) => ({
-          product: productMap.get(String(item.productId)),
-          variantId: item.variantId,
-          quantity: item.quantity,
-        })),
-      );
+      if (!parcel) {
+        // purono order (parcel snapshot nei): ekhon product theke hishab
+        const productMap = new Map(products.map((p) => [String(p._id), p]));
+        parcel = shiprocket.buildParcel(
+          order.items
+            .map((item) => ({
+              product: productMap.get(String(item.productId)),
+              variantId: item.variantId,
+              quantity: item.quantity,
+            }))
+            .filter((e) => e.product),
+        );
+        await OrderModel.updateOne({ _id: orderId }, { $set: { parcel } });
+      }
 
-      // courier ke COD collect korte bolbo shudhu jodi app e COD hoy.
-      // paymentOff (store nijer sathe taka nei) hole Prepaid dhori, jeno courier taka na tole
       const courierPaymentMethod =
         order.paymentMethod === "COD" && !order.paymentOff ? "COD" : "Prepaid";
 
@@ -504,7 +561,6 @@ const createShiprocketShipment = async (req, res) => {
       const payload = {
         order_id: order.orderNumber,
         order_date: fmtOrderDate(order.createdAt),
-        // Shiprocket panel e ei naam e pickup location thakte hobe (= storeUniqueId)
         pickup_location: store.storeUniqueId,
         billing_customer_name: addr.fullName,
         billing_last_name: "",
@@ -527,14 +583,13 @@ const createShiprocketShipment = async (req, res) => {
           hsn: "",
         })),
         payment_method: courierPaymentMethod,
-        // items er total + customer er dewa shipping charge alada (totalAmount e dutoi ache)
         sub_total:
           order.itemsTotal ??
           Math.max(0, order.totalAmount - (order.shippingCharge || 0)),
         shipping_charges: order.shippingCharge || 0,
-        length: parcel.length,
-        breadth: parcel.breadth,
-        height: parcel.height,
+        length: parcel.length || 10,
+        breadth: parcel.breadth || 10,
+        height: parcel.height || 10,
         weight: parcel.weight,
       };
 
@@ -556,6 +611,14 @@ const createShiprocketShipment = async (req, res) => {
         trackingUrl: null,
         status: "CREATED",
         pickupRequestedAt: null,
+        pickupScheduledDate: null,
+        pickupTokenNumber: null,
+        // courier er ETD ashar age customer ke dekhano estimate-i dhori
+        etd: order.deliveryInfo?.estimatedMaxDate ?? null,
+        etdSource: "ESTIMATE",
+        appliedWeight: null,
+        courierSwitched: false,
+        events: [],
         lastEventAt: null,
         createdAt: new Date(),
       };
@@ -564,17 +627,30 @@ const createShiprocketShipment = async (req, res) => {
 
     // ---------- Step B: AWB assign ----------
     if (!shipment.awb) {
-      const awbRes = await shiprocket.assignAwb({
-        shipmentId: shipment.shipmentId,
-        courierId: shipment.courierId,
-      });
-      const awbData = awbRes?.response?.data || {};
-      const awb = awbData.awb_code || awbRes?.awb_code;
+      const extract = (r) => {
+        const d = r?.response?.data || {};
+        return { awb: d.awb_code || r?.awb_code, data: d, message: d.message || r?.message };
+      };
 
-      if (!awb) {
+      let awbRes = await shiprocket
+        .assignAwb({
+          shipmentId: shipment.shipmentId,
+          courierId: shipment.courierId,
+        })
+        .catch(() => null);
+      let ex = extract(awbRes);
+      let switched = false;
+
+      // quoted courier ekhon available na hole Shiprocket ke nije courier thik korte dai
+      if (!ex.awb && shipment.courierId) {
+        awbRes = await shiprocket.assignAwb({ shipmentId: shipment.shipmentId });
+        ex = extract(awbRes);
+        switched = true;
+      }
+
+      if (!ex.awb) {
         throw new shiprocket.ShiprocketError(
-          awbData.message ||
-            awbRes?.message ||
+          ex.message ||
             "AWB could not be assigned. Check the courier wallet balance",
           { data: awbRes },
         );
@@ -582,10 +658,15 @@ const createShiprocketShipment = async (req, res) => {
 
       shipment = {
         ...shipment,
-        awb: String(awb),
-        courierId: awbData.courier_company_id ?? shipment.courierId,
-        courierName: awbData.courier_name ?? shipment.courierName,
-        trackingUrl: trackingUrlFor(awb),
+        awb: String(ex.awb),
+        courierId: ex.data.courier_company_id ?? shipment.courierId,
+        courierName: ex.data.courier_name ?? shipment.courierName,
+        trackingUrl: trackingUrlFor(ex.awb),
+        appliedWeight: Number(ex.data.applied_weight) || null,
+        assignedAt: parseDate(ex.data.assigned_date_time) || new Date(),
+        pickupScheduledDate:
+          parseDate(ex.data.pickup_scheduled_date) || shipment.pickupScheduledDate,
+        courierSwitched: switched,
         status: "AWB_ASSIGNED",
       };
       await persist();
@@ -595,10 +676,15 @@ const createShiprocketShipment = async (req, res) => {
     let pickupError = null;
     if (!shipment.pickupRequestedAt) {
       try {
-        await shiprocket.generatePickup(shipment.shipmentId);
+        const pr = await shiprocket.generatePickup(shipment.shipmentId);
+        const p = pr?.response || pr || {};
         shipment = {
           ...shipment,
           pickupRequestedAt: new Date(),
+          pickupScheduledDate:
+            parseDate(p.pickup_scheduled_date) || shipment.pickupScheduledDate,
+          pickupTokenNumber:
+            p.pickup_token_number != null ? String(p.pickup_token_number) : null,
           status: "PICKUP_SCHEDULED",
         };
       } catch (err) {
@@ -610,7 +696,6 @@ const createShiprocketShipment = async (req, res) => {
       }
     }
 
-    // delivery date na thakle courier er estimate bosiye dei (store ar SHIPPED korte parbe)
     const set = { shipment };
     if (!order.expectedDeliveryDate && order.deliveryInfo?.estimatedMaxDate) {
       set.expectedDeliveryDate = order.deliveryInfo.estimatedMaxDate;
@@ -674,17 +759,35 @@ const courierWebhook = async (req, res) => {
       return res.status(200).json({ success: true, ignored: true });
     }
 
-    await OrderModel.updateOne(
-      { _id: order._id },
-      {
-        $set: {
-          "shipment.status": rawStatus,
-          "shipment.lastEventAt": new Date(),
-        },
-      },
-    );
+    const set = {
+      "shipment.status": rawStatus,
+      "shipment.lastEventAt": parseDate(body.current_timestamp) || new Date(),
+    };
 
-    // courier delivered dile order DELIVERED (RTO DELIVERED alada status, eta match korbe na)
+    if (body.courier_name) set["shipment.courierName"] = String(body.courier_name);
+
+    // courier er nijer ETD (customer ke dekhano estimate er cheye nirbhorjogyo)
+    const etd = parseDate(body.etd);
+    if (etd) {
+      set["shipment.etd"] = etd;
+      set["shipment.etdSource"] = "COURIER";
+    }
+
+    // tracking history (replace, tai duplicate webhook e double hoy na)
+    if (Array.isArray(body.scans) && body.scans.length > 0) {
+      set["shipment.events"] = body.scans
+        .map((s) => ({
+          status: s["sr-status-label"] || s.status || null,
+          activity: s.activity || null,
+          location: s.location || null,
+          at: parseDate(s.date),
+        }))
+        .sort((a, b) => (a.at?.getTime() || 0) - (b.at?.getTime() || 0))
+        .slice(-30);
+    }
+
+    await OrderModel.updateOne({ _id: order._id }, { $set: set });
+
     if (rawStatus.toUpperCase() === "DELIVERED" && order.status === "SHIPPED") {
       const extra =
         order.paymentMethod === "COD"

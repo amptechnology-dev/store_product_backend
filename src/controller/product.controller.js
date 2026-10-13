@@ -44,6 +44,7 @@ const {
 const { getDeliverySummary } = require("../helper/deliveryEstimate.js");
 // [GST]
 const { applyGst, withEffectiveGst } = require("../helper/gst.js");
+const shiprocket = require("../helper/shiprocket.js");
 
 const escapeRegex = (str = "") => str.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
@@ -1554,11 +1555,32 @@ const getStoreSingleProduct = async (req, res) => {
           .lean()
       : [];
 
-    const delivery = await getDeliverySummary({
-      storeId: store._id,
-      pincode: req.query.pincode,
-      country: req.query.country,
-    });
+    const rawVariant = String(req.query.variantId || "").trim();
+    const parcel = shiprocket.buildParcel([
+      {
+        product,
+        variantId:
+          !rawVariant || rawVariant === "null" || rawVariant === "undefined"
+            ? null
+            : rawVariant,
+        quantity: Math.max(1, parseInt(req.query.quantity, 10) || 1),
+      },
+    ]);
+
+    const [delivery, productDelivery] = await Promise.all([
+      // related products er jonno (default weight)
+      getDeliverySummary({
+        storeId: store._id,
+        pincode: req.query.pincode,
+        country: req.query.country,
+      }),
+      getDeliverySummary({
+        storeId: store._id,
+        pincode: req.query.pincode,
+        country: req.query.country,
+        parcel,
+      }),
+    ]);
 
     const relatedProducts = relatedRaw.map((p) => ({
       ...formatProduct({
@@ -1571,8 +1593,8 @@ const getStoreSingleProduct = async (req, res) => {
     return res.status(200).json({
       success: true,
       store,
-      delivery,
-      product: { ...formatProduct(product), delivery },
+      delivery: productDelivery,
+      product: { ...formatProduct(product), delivery: productDelivery },
       relatedProducts,
     });
   } catch (error) {

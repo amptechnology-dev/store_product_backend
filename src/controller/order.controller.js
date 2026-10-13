@@ -42,7 +42,10 @@ const {
   computeTotals,
   QUOTE_PENDING_STATUSES,
 } = require("../helper/priceQuote.js");
-const { checkStoreDelivery,finalizeShipping } = require("../helper/deliveryEstimate.js");
+const {
+  checkStoreDelivery,
+  finalizeShipping,
+} = require("../helper/deliveryEstimate.js");
 // [GST]
 const { getGstMode, applyGstToItem } = require("../helper/gst.js");
 const { calcWeightKg } = require("../helper/shiprocket.js");
@@ -50,7 +53,7 @@ const {
   getStorePolicy,
   resolvePaymentForStore,
 } = require("../helper/storePolicy.js");
-
+const { buildParcel } = require("../helper/shiprocket.js");
 
 // ===================== CONSTANTS / HELPERS =====================
 const ORDER_STATUSES = [
@@ -175,8 +178,8 @@ const rollbackLines = (lines) =>
 
 // ===================== INTERNAL HELPER =====================
 
-const linesWeightKg = (lines, productMap) =>
-  calcWeightKg(
+const linesParcel = (lines, productMap) =>
+  buildParcel(
     lines
       .map((l) => ({
         product: productMap.get(String(l.productId)),
@@ -232,13 +235,12 @@ const attemptStoreCheckout = async ({
   const effectiveMethod = payment.method; // "COD" | "ONLINE"
   const paymentOff = payment.paymentOff;
 
-  // [DELIVERY + SHIPPING] address check + somoy + charge (delivery off hole kichui hobe na)
+  const parcel = linesParcel(lines, productMap);
   const delivery = await checkStoreDelivery({
     storeId,
     pincode: deliveryAddress?.pincode,
     country: deliveryAddress?.country,
-    weightKg: linesWeightKg(lines, productMap),
-    // courier COD collect korbe shudhu jodi app e COD hoy (payment off hole na)
+    parcel,
     cod: effectiveMethod === "COD" && !paymentOff,
     policy,
   });
@@ -479,6 +481,7 @@ const attemptStoreCheckout = async ({
       priceStatus,
       deliveryAddress,
       deliveryInfo: shippingInfo,
+      parcel: policy.hasDelivery ? parcel : null,
       note,
       paymentMethod: effectiveMethod,
       paymentOff,

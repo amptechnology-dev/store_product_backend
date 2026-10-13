@@ -132,11 +132,23 @@ const deliveryInfoSchema = new mongoose.Schema(
     courierId: { type: Number, default: null },
     courierName: { type: String, default: null },
     courierRate: { type: Number, default: null }, // courier ke asol khoroch
+    courierEtaDays: { type: Number, default: null }, // courier er nijer ETA (din)
+    chargeableWeightKg: { type: Number, default: null },
     shippingCharge: { type: Number, default: 0 }, // customer ke je charge
     baseShippingCharge: { type: Number, default: null }, // order value rule er age
     shippingNote: { type: String, default: null }, // "Within 5 km" / "Free delivery on orders of ₹500 or more"
     country: { type: String, default: null },
     pincode: { type: String, default: null },
+  },
+  { _id: false },
+);
+
+const shipmentEventSchema = new mongoose.Schema(
+  {
+    status: { type: String, default: null },
+    activity: { type: String, default: null },
+    location: { type: String, default: null },
+    at: { type: Date, default: null },
   },
   { _id: false },
 );
@@ -152,9 +164,53 @@ const shipmentSchema = new mongoose.Schema(
     courierName: { type: String, default: null },
     trackingUrl: { type: String, default: null },
     status: { type: String, default: null },
+
     pickupRequestedAt: { type: Date, default: null },
+    pickupScheduledDate: { type: Date, default: null }, // courier kabe pickup nebe
+    pickupTokenNumber: { type: String, default: null },
+    assignedAt: { type: Date, default: null },
+
+    etd: { type: Date, default: null }, // courier er estimated delivery date
+    etdSource: { type: String, enum: ["ESTIMATE", "COURIER"], default: "ESTIMATE" },
+    appliedWeight: { type: Number, default: null }, // Shiprocket je weight e charge korlo
+    courierSwitched: { type: Boolean, default: false }, // quoted courier na pele auto-assign hole true
+
+    events: { type: [shipmentEventSchema], default: [] }, // tracking history (webhook)
     lastEventAt: { type: Date, default: null },
     createdAt: { type: Date, default: Date.now },
+  },
+  { _id: false },
+);
+
+// order place er somoy ki weight/size dhore shipping charge hishab hoyechilo (snapshot)
+const parcelItemSchema = new mongoose.Schema(
+  {
+    productId: { type: mongoose.Schema.Types.ObjectId, ref: "Product" },
+    variantId: { type: mongoose.Schema.Types.ObjectId, default: null },
+    name: { type: String, default: null },
+    quantity: { type: Number, default: 1 },
+    unitWeightKg: { type: Number, default: 0 },
+    lineWeightKg: { type: Number, default: 0 },
+    length: { type: Number, default: 0 }, // per unit, cm
+    breadth: { type: Number, default: 0 },
+    height: { type: Number, default: 0 },
+    usedDefaultWeight: { type: Boolean, default: false },
+    usedDefaultDims: { type: Boolean, default: false },
+  },
+  { _id: false },
+);
+
+const parcelSchema = new mongoose.Schema(
+  {
+    length: { type: Number, default: 0 },
+    breadth: { type: Number, default: 0 },
+    height: { type: Number, default: 0 },
+    weight: { type: Number, default: 0 }, // dead weight kg
+    volumetricWeight: { type: Number, default: 0 },
+    chargeableWeight: { type: Number, default: 0 },
+    dimsComplete: { type: Boolean, default: false },
+    weightComplete: { type: Boolean, default: false },
+    items: { type: [parcelItemSchema], default: [] },
   },
   { _id: false },
 );
@@ -230,6 +286,7 @@ const orderSchema = new mongoose.Schema(
     deliveryEnabled: { type: Boolean, default: true },
     paymentOff: { type: Boolean, default: false },
     shipment: { type: shipmentSchema, default: null },
+    parcel: { type: parcelSchema, default: null },
     // ---------- payment ----------
     paymentMethod: { type: String, enum: PAYMENT_METHODS, default: "COD" },
     paymentStatus: {

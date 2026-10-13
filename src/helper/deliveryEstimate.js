@@ -13,7 +13,9 @@ const isValidPincode = (p) => /^[1-9][0-9]{5}$/.test(String(p || "").trim());
 const isValidPostalCode = (p) =>
   /^[A-Za-z0-9][A-Za-z0-9 -]{1,10}[A-Za-z0-9]$/.test(String(p || "").trim());
 const isIndia = (country) => {
-  const c = String(country || "").trim().toLowerCase();
+  const c = String(country || "")
+    .trim()
+    .toLowerCase();
   return !c || ["india", "in", "ind", "bharat"].includes(c);
 };
 
@@ -112,11 +114,18 @@ const buildInfo = (mode, distanceKm, minMinutes, maxMinutes, extra = {}) => {
     ...extra,
   };
 
-  if (info.baseShippingCharge === null || info.baseShippingCharge === undefined) {
+  if (
+    info.baseShippingCharge === null ||
+    info.baseShippingCharge === undefined
+  ) {
     info.baseShippingCharge = info.shippingCharge;
   }
   return info;
 };
+
+// courier er ETA na thakle manual din
+const etaOf = (courier, fallbackDays) =>
+  Number.isFinite(courier?.etaDays) ? courier.etaDays : fallbackDays;
 
 // Radius er moddhe kon kon pincode porche (store er jonno preview)
 const findPincodesInRadius = ({ coordinates, radiusKm, limit = 500 }) =>
@@ -142,7 +151,9 @@ const countPincodesInRadius = ({ coordinates, radiusKm }) =>
 const pickSlab = (slabs, distanceKm) => {
   if (!Array.isArray(slabs) || slabs.length === 0) return null;
   const sorted = [...slabs].sort((a, b) => a.upToKm - b.upToKm);
-  return sorted.find((s) => distanceKm <= s.upToKm) || sorted[sorted.length - 1];
+  return (
+    sorted.find((s) => distanceKm <= s.upToKm) || sorted[sorted.length - 1]
+  );
 };
 
 const resolveLocal = ({ cfg, distanceKm, handlingMin, pin }) => {
@@ -165,21 +176,23 @@ const resolveLocal = ({ cfg, distanceKm, handlingMin, pin }) => {
 };
 
 // ---------- NATIONAL: Shiprocket thakle courier er asol ETA + rate, nahole manual ----------
-const resolveNational = async ({ cfg, pin, handlingMin, weightKg, cod }) => {
+const resolveNational = async ({ cfg, pin, handlingMin, weightKg, parcel, cod }) => {
   if (shiprocket.isAvailable()) {
     try {
       const svc = await shiprocket.checkServiceability({
         pickupPostcode: cfg.pincode,
         deliveryPostcode: pin,
         weightKg,
+        parcel,
         cod,
       });
 
       if (!svc.serviceable) return { serviceable: false, info: null };
 
-      // min = shobcheye druto courier, max = shobcheye sosta courier er ETA
-      const minMin = handlingMin + svc.fastest.etaDays * 1440;
-      const maxMin = Math.max(minMin, handlingMin + svc.cheapest.etaDays * 1440);
+      const fastDays = etaOf(svc.fastest, cfg.nationalMinDays || 0);
+      const cheapDays = etaOf(svc.cheapest, cfg.nationalMaxDays || 0);
+      const minMin = handlingMin + fastDays * 1440;
+      const maxMin = Math.max(minMin, handlingMin + cheapDays * 1440);
       const rate = round2(svc.cheapest.rate);
 
       return {
@@ -189,13 +202,16 @@ const resolveNational = async ({ cfg, pin, handlingMin, weightKg, cod }) => {
           courierId: svc.cheapest.id,
           courierName: svc.cheapest.name,
           courierRate: rate,
+          courierEtaDays: Number.isFinite(svc.cheapest.etaDays)
+            ? svc.cheapest.etaDays
+            : null,
+          chargeableWeightKg: parcel?.chargeableWeight ?? weightKg ?? null,
           shippingCharge: rate,
           shippingNote: `Courier (${svc.cheapest.name}) to ${pin}`,
           pincode: pin,
         }),
       };
     } catch (err) {
-      // Shiprocket e somossa hole order/listing atkabe na, manual estimate e fallback
       console.error(
         "Shiprocket serviceability failed, using manual estimate:",
         err.message,
@@ -213,6 +229,7 @@ const resolveNational = async ({ cfg, pin, handlingMin, weightKg, cod }) => {
       {
         shippingCharge: round2(cfg.nationalFallbackCharge),
         shippingNote: `Courier delivery to ${pin}`,
+        chargeableWeightKg: parcel?.chargeableWeight ?? weightKg ?? null,
         pincode: pin,
       },
     ),
@@ -227,8 +244,13 @@ const resolveInternational = async ({
   country,
   handlingMin,
   weightKg,
+  parcel,
 }) => {
   const countryCode = shiprocket.toCountryCode(country);
+
+  if (shiprocket.isAvailable() && !countryCode) {
+    console.warn(`[Delivery] No ISO code mapped for country "${country}", using manual estimate`);
+  }
 
   if (shiprocket.isAvailable() && countryCode) {
     try {
@@ -236,14 +258,14 @@ const resolveInternational = async ({
         pickupPostcode: cfg.pincode,
         countryCode,
         weightKg,
+        parcel,
       });
 
       if (svc.serviceable) {
-        const minMin = handlingMin + svc.fastest.etaDays * 1440;
-        const maxMin = Math.max(
-          minMin,
-          handlingMin + svc.cheapest.etaDays * 1440,
-        );
+        const fastDays = etaOf(svc.fastest, cfg.internationalMinDays ?? 7);
+        const cheapDays = etaOf(svc.cheapest, cfg.internationalMaxDays ?? 14);
+        const minMin = handlingMin + fastDays * 1440;
+        const maxMin = Math.max(minMin, handlingMin + cheapDays * 1440);
         const rate = round2(svc.cheapest.rate);
 
         return buildInfo("INTERNATIONAL", null, minMin, maxMin, {
@@ -251,6 +273,10 @@ const resolveInternational = async ({
           courierId: svc.cheapest.id,
           courierName: svc.cheapest.name,
           courierRate: rate,
+          courierEtaDays: Number.isFinite(svc.cheapest.etaDays)
+            ? svc.cheapest.etaDays
+            : null,
+          chargeableWeightKg: parcel?.chargeableWeight ?? weightKg ?? null,
           shippingCharge: rate,
           shippingNote: `International courier to ${country}`,
           country,
@@ -270,6 +296,7 @@ const resolveInternational = async ({
     {
       shippingCharge: round2(cfg.internationalFallbackCharge),
       shippingNote: `International shipping to ${country}`,
+      chargeableWeightKg: parcel?.chargeableWeight ?? weightKg ?? null,
       country,
       pincode: pin,
     },
@@ -302,9 +329,14 @@ const finalizeShipping = (delivery, itemsTotal) => {
   if (!info) return null;
 
   const base = info.shippingCharge;
-  if (info.mode === "INTERNATIONAL") return { ...info, baseShippingCharge: base };
+  if (info.mode === "INTERNATIONAL")
+    return { ...info, baseShippingCharge: base };
 
-  const { charge, rule } = applyChargeRules(base, itemsTotal, delivery.chargeRules);
+  const { charge, rule } = applyChargeRules(
+    base,
+    itemsTotal,
+    delivery.chargeRules,
+  );
   if (!rule) return { ...info, baseShippingCharge: base };
 
   return {
@@ -338,12 +370,12 @@ const checkStoreDelivery = async ({
   pincode,
   country,
   weightKg,
+  parcel, // shiprocket.buildParcel() er result (dile weight + dimension dhore)
   cod = false,
   policy,
 }) => {
   const pol = policy || (await getStorePolicy(storeId));
 
-  // [SETTINGS] store delivery off korle estimate / charge / pincode restriction kichui nei
   if (!pol.hasDelivery) {
     return { deliverable: true, configured: false, disabled: true, info: null };
   }
@@ -360,8 +392,9 @@ const checkStoreDelivery = async ({
   const allowLocal = cfg.deliveryType === "LOCAL" || cfg.deliveryType === "BOTH";
   const allowNational =
     cfg.deliveryType === "NATIONAL" || cfg.deliveryType === "BOTH";
+  const weight = parcel?.weight ?? weightKg;
 
-  // ---------- INTERNATIONAL (India chara onno desh) ----------
+  // ---------- INTERNATIONAL ----------
   if (!isIndia(country)) {
     const countryName = String(country).trim();
 
@@ -382,7 +415,8 @@ const checkStoreDelivery = async ({
       pin,
       country: countryName,
       handlingMin,
-      weightKg,
+      weightKg: weight,
+      parcel,
     });
     return { deliverable: true, configured: true, info, chargeRules: [] };
   }
@@ -394,7 +428,7 @@ const checkStoreDelivery = async ({
 
   const chargeRules = cfg.chargeRules || [];
 
-  // ---------- LOCAL: radius check ----------
+  // ---------- LOCAL ----------
   if (allowLocal && cfg.radiusKm) {
     let distanceKm = null;
 
@@ -421,13 +455,14 @@ const checkStoreDelivery = async ({
     }
   }
 
-  // ---------- NATIONAL: courier ----------
+  // ---------- NATIONAL ----------
   if (allowNational) {
     const national = await resolveNational({
       cfg,
       pin,
       handlingMin,
-      weightKg,
+      weightKg: weight,
+      parcel,
       cod,
     });
 
@@ -444,7 +479,6 @@ const checkStoreDelivery = async ({
     };
   }
 
-  // radius er baire + courier off
   return notDeliverable(`This store does not deliver to pincode ${pin}`);
 };
 
@@ -459,6 +493,7 @@ const getDeliverySummary = async ({
   pincode,
   country,
   itemsTotal = null,
+  parcel = null, // product detail e dile oi product er weight/size dhore estimate
 }) => {
   const pin = String(pincode || "").trim();
   if (!pin) return null;
@@ -470,6 +505,7 @@ const getDeliverySummary = async ({
     storeId,
     pincode: pin,
     country,
+    parcel,
     policy,
   });
   if (!result.configured) return null;
@@ -490,6 +526,7 @@ const getDeliverySummary = async ({
       freeDeliveryAbove: null,
       shippingNote: null,
       courierName: null,
+      chargeableWeightKg: null,
       label: result.message,
     };
   }
@@ -499,7 +536,6 @@ const getDeliverySummary = async ({
       ? finalizeShipping(result, itemsTotal)
       : result.info;
 
-  // "eto taka er upor free delivery" dekhanor jonno
   const freeRules = (result.chargeRules || [])
     .filter((r) => r.charge === 0)
     .map((r) => r.minOrderValue);
@@ -520,6 +556,7 @@ const getDeliverySummary = async ({
     freeDeliveryAbove,
     shippingNote: info.shippingNote,
     courierName: info.courierName ?? null,
+    chargeableWeightKg: info.chargeableWeightKg ?? null,
     label: info.etaLabel,
   };
 };
