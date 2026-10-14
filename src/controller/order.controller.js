@@ -95,6 +95,9 @@ const cleanVariantId = (id) => {
   return id;
 };
 
+const lineHasGst = (g) =>
+  !!g && ["cgst", "sgst", "igst"].some((k) => g[k] != null);
+
 const parsePagination = (query) => {
   const pageNum = Math.max(parseInt(query.page) || 1, 1);
   const limitNum = Math.min(
@@ -379,6 +382,7 @@ const attemptStoreCheckout = async ({
       // [GST] size -> color -> product
       gstRates: source.gst,
       gstInclusive: source.gstInclusive === true,
+      hsnCode: lineHasGst(source.gst) ? product.hsnCode || null : null,
       mrp: hasPrice(source.mrp)
         ? source.mrp
         : priceOnRequest

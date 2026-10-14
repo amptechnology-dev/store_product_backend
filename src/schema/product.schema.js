@@ -32,6 +32,7 @@ const createProductSchema = z.object({
   packagingDetails: packagingDetailsSchema,
   gst: gstSchema,
   gstInclusive: z.coerce.boolean().optional(),
+  hsnCode: z.string().trim().optional(),
   variants: z.array(z.record(z.any())).optional(),
 });
 

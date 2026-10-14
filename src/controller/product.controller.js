@@ -207,6 +207,47 @@ const syncTiers = (data, body, hasVariants) => {
   });
 };
 
+// [HSN] 4 / 6 / 8 digit
+const HSN_REGEX = /^(\d{4}|\d{6}|\d{8})$/;
+
+// [HSN] product / color / size, je kono level e GST rate thakle true
+const hasAnyGst = (data) => {
+  const has = (g) =>
+    !!g &&
+    ["cgst", "sgst", "igst"].some((k) => g[k] !== undefined && g[k] !== null);
+
+  return (
+    has(data.gst) ||
+    (data.variants || []).some(
+      (v) => has(v.gst) || (v.sizeVariants || []).some((s) => has(s.gst)),
+    )
+  );
+};
+
+// [HSN] GST thakle HSN required + validate, GST na thakle HSN bad.
+// error message return kore, thik thakle null
+const applyHsn = (body, data) => {
+  const raw =
+    typeof body.hsnCode === "string" ? body.hsnCode.replace(/\s+/g, "") : "";
+
+  if (!hasAnyGst(data)) {
+    data.hsnCode = undefined;
+    return null;
+  }
+  if (!raw) return "HSN code is required when GST is applied";
+  if (!HSN_REGEX.test(raw)) return "HSN code must be 4, 6 or 8 digits";
+
+  data.hsnCode = raw;
+  return null;
+};
+
+const hsnErrorResponse = (res, message) =>
+  res.status(400).json({
+    success: false,
+    message: "Validation failed",
+    errors: [{ field: "hsnCode", message }],
+  });
+
 const createProduct = async (req, res) => {
   try {
     const body = { ...req.body };
@@ -325,6 +366,8 @@ const createProduct = async (req, res) => {
         errors: [{ field: "gst", message: gstError }],
       });
     }
+    const hsnError = applyHsn(body, data);
+    if (hsnError) return hsnErrorResponse(res, hsnError);
 
     // [STOCK] store settings e stock management on ache kina (product e snapshot hishebe save hobe)
     const stockEnabled = await getStockManagementEnabled(parsedData.storeId);
@@ -485,9 +528,9 @@ const getAllProducts = async (req, res) => {
           priceTiers: 1,
           mrp: 1,
           offerPrice: 1,
-          // [GST] list page er badge / quick view er jonno (variants er bhetore nested gst ashe)
           gst: 1,
           gstInclusive: 1,
+          hsnCode: 1,
           stock: 1,
           hasVariants: 1,
           hasColor: 1,
@@ -722,6 +765,9 @@ const updateProduct = async (req, res) => {
         });
       }
 
+      const hsnError = applyHsn(body, data);
+      if (hsnError) return hsnErrorResponse(res, hsnError);
+
       if (hasColor) {
         const colorImageMap = await uploadVariantImages(req.files);
         data.variants = (data.variants || []).map((colorVariant, idx) => ({
@@ -806,6 +852,12 @@ const updateProduct = async (req, res) => {
       if (!data.gst) {
         delete updateData.gst;
         unsetFields.gst = "";
+      }
+
+      // [HSN] GST na thakle purono HSN muchte $unset (undefined $set e purono value theke jay)
+      if (!data.hsnCode) {
+        delete updateData.hsnCode;
+        unsetFields.hsnCode = "";
       }
 
       // [STOCK] low stock flag shudhu stock managed product er jonno
@@ -1053,6 +1105,7 @@ const allProductWithStore = async (req, res) => {
           priceTiers: 1,
           gst: 1, // [GST]
           gstInclusive: 1, // [GST]
+          hsnCode: 1,
           minOfferPrice: 1,
           maxOfferPrice: 1,
           deliveryTime: 1,
@@ -1102,10 +1155,8 @@ const allProductWithStore = async (req, res) => {
 const PUBLIC_STORE_FIELDS =
   "storeName storeType storeUniqueId images address lat long contactNo whatsappNo supportNo email description timingByDay isFeatured";
 
-// [QUOTE] mrp offerPrice add kora hoyeche (simple product ke vul kore "price on request" na dhorar jonno)
-// [GST] gst gstInclusive add (variants er bhetore nested gst automatic ashe)
 const PRODUCT_LIST_FIELDS =
-  "name productCode images description unit mrp offerPrice variants priceTiers gst gstInclusive deliveryTime storeId categoryId createdAt";
+  "name productCode images description unit mrp offerPrice variants priceTiers gst gstInclusive hsnCode deliveryTime storeId categoryId createdAt";
 
 const SORT_MAP = {
   newest: { createdAt: -1 },
@@ -1225,8 +1276,9 @@ const fetchStoreProducts = async (store, query, categoryId) => {
               priceTiers: 1,
               mrp: 1,
               offerPrice: 1,
-              gst: 1, // [GST]
-              gstInclusive: 1, // [GST]
+              gst: 1, 
+              gstInclusive: 1, 
+              hsnCode: 1,
               stock: 1,
               hasVariants: 1,
               hasColor: 1,

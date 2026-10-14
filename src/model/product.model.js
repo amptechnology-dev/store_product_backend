@@ -159,6 +159,7 @@ const productSchema = new mongoose.Schema(
     hasColor: { type: Boolean, default: false },
     hasStockManagement: { type: Boolean, default: true },
     gstInclusive: { type: Boolean, default: false },
+    hsnCode: { type: String, trim: true },
     isActive: { type: Boolean, default: true },
     isVerified: { type: Boolean, default: false },
     storeId: {

@@ -47,6 +47,7 @@ const orderItemSchema = new mongoose.Schema({
   priceOnRequest: { type: Boolean, default: false },
   gstRates: { type: gstRatesSchema, default: null }, // product e configured rate
   gstInclusive: { type: Boolean, default: false },
+  hsnCode: { type: String, default: null },
   taxableAmount: { type: Number, default: null },
   cgstAmount: { type: Number, default: 0 },
   sgstAmount: { type: Number, default: 0 },
