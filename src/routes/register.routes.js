@@ -6,6 +6,7 @@ const {
   registerUser,
   createUser,
   allStores,
+  allStoresNoPagination,
   singleStore,
   updateStoreAndUser,
   deleteStoreAndUser,
@@ -25,7 +26,7 @@ const {
   clearRecentSearches,
   relatedStores,
   nearbyStores,
-  generateStoreQrCode
+  generateStoreQrCode,
 } = require("../controller/register.controller.js");
 const verifyJwt = require("../middleware/verifiyUser.js");
 const authorize = require("../middleware/authorize.js");
@@ -56,6 +57,7 @@ router.patch("/update-store-featured/:storeId", updateStoreFeatured);
 router.get("/stores-by-subcategory/:subCategoryId", storesBySubCategory);
 router.get("/search-store-names", searchStoreNames);
 router.get("/all-states", allStates);
+router.get("/all-stores-no-pagination", allStoresNoPagination);
 router.get("/stores-by-state/:state", storesByState);
 router.get("/recent-search-stores", verifyJwt, recentSearchStores);
 router.delete("/clear-recent-searches", verifyJwt, clearRecentSearches);

@@ -1660,11 +1660,68 @@ const generateStoreQrCode = async (req, res) => {
   }
 };
 
+const allStoresNoPagination = async (req, res) => {
+  try {
+    const search = String(req.query.search || "").trim();
+
+    const match = {};
+    if (search) {
+      // special regex character escape kora hoche, jate search e crash/injection na hoy
+      const escaped = search.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      match.storeName = { $regex: escaped, $options: "i" };
+    }
+
+    const stores = await StoreModel.aggregate([
+      { $match: match },
+      {
+        $lookup: {
+          from: "users",
+          localField: "userId",
+          foreignField: "_id",
+          as: "owner",
+        },
+      },
+      {
+        $unwind: {
+          path: "$owner",
+          preserveNullAndEmptyArrays: true,
+        },
+      },
+      {
+        $addFields: {
+          ownerName: "$owner.name",
+          ownerEmail: "$owner.email",
+          ownerPhone: "$owner.phone",
+        },
+      },
+      {
+        $project: {
+          owner: 0,
+          fcmTokens: 0, // public route, tai sensitive field bad
+        },
+      },
+      { $sort: { createdAt: -1 } },
+    ]);
+
+    return res.status(200).json({
+      totalStores: stores.length,
+      stores,
+    });
+  } catch (error) {
+    console.error("Error fetching all stores (no pagination):", error);
+
+    return res.status(500).json({
+      message: "Internal server error",
+    });
+  }
+};
+
 module.exports = {
   registerAdmin,
   registerOwner,
   createUser,
   allStores,
+  allStoresNoPagination,
   singleStore,
   updateStoreAndUser,
   deleteStoreAndUser,
