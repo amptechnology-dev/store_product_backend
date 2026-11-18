@@ -1666,10 +1666,15 @@ const allStoresNoPagination = async (req, res) => {
 
     const match = {};
     if (search) {
-      // special regex character escape kora hoche, jate search e crash/injection na hoy
       const escaped = search.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
       match.storeName = { $regex: escaped, $options: "i" };
     }
+
+    // trailing slash thakle remove kore nibe
+    const baseUrl = String(process.env.STORE_LINK_BASE_URL || "").replace(
+      /\/+$/,
+      "",
+    );
 
     const stores = await StoreModel.aggregate([
       { $match: match },
@@ -1697,15 +1702,23 @@ const allStoresNoPagination = async (req, res) => {
       {
         $project: {
           owner: 0,
-          fcmTokens: 0, // public route, tai sensitive field bad
+          fcmTokens: 0,
         },
       },
       { $sort: { createdAt: -1 } },
     ]);
 
+    // prottek store e storeUrl section add
+    const storesWithUrl = stores.map((store) => ({
+      ...store,
+      storeUrl: store.storeUniqueId
+        ? `${baseUrl}/store/${store.storeUniqueId}`
+        : null,
+    }));
+
     return res.status(200).json({
-      totalStores: stores.length,
-      stores,
+      totalStores: storesWithUrl.length,
+      stores: storesWithUrl,
     });
   } catch (error) {
     console.error("Error fetching all stores (no pagination):", error);
